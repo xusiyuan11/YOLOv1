@@ -61,7 +61,6 @@ python main.py demo
 
 确保你的数据目录结构如下：
 ```
-data/
 ├── COCO/
 │   ├── train2017/          # COCO训练图像
 │   ├── val2017/            # COCO验证图像
@@ -76,8 +75,8 @@ data/
         └── VOC2012/
             ├── JPEGImages/
             └── Annotations/
-
 ```
+
 
 ###  配置文件
 
@@ -180,4 +179,5 @@ checkpoints/
 - [YOLOv1 Paper](https://arxiv.org/abs/1506.02640) - 原始论文
 
 ---
+
 
