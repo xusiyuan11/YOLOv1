@@ -281,3 +281,76 @@ class DetectionTrainer:
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
         
         # 训练循环\n        print(f\"开始训练，共 {epochs} 个epoch\")\n        print(f\"前 {freeze_epochs} 个epoch将冻结backbone\")\n        \n        for epoch in range(start_epoch, epochs):\n            # 确定是否冻结backbone\n            freeze_backbone = epoch < freeze_epochs\n            \n            # 训练\n            train_loss = self.train_epoch(\n                model, train_loader, criterion, optimizer, epoch, freeze_backbone\n            )\n            \n            # 验证\n            val_loss, val_map = self.validate_epoch(model, val_loader, criterion, epoch)\n            \n            # 学习率调度\n            scheduler.step()\n            \n            # 记录统计信息\n            self.train_losses.append(train_loss)\n            self.val_losses.append(val_loss)\n            train_map = self.calculate_map(model, train_loader)  # 训练集mAP\n            self.train_maps.append(train_map)\n            self.val_maps.append(val_map)\n            \n            # 打印epoch结果\n            print(f\"Epoch {epoch+1}/{epochs}:\")\n            print(f\"  训练 - Loss: {train_loss:.4f}, mAP: {train_map:.4f}\")\n            print(f\"  验证 - Loss: {val_loss:.4f}, mAP: {val_map:.4f}\")\n            print(f\"  学习率: {scheduler.get_last_lr()}\")\n            print(f\"  Backbone: {'冻结' if freeze_backbone else '训练'}\")\n            \n            # 保存最佳模型\n            if val_map > best_map:\n                best_map = val_map\n                best_model_path = os.path.join(self.save_dir, 'best_detection_model.pth')\n                save_checkpoint({\n                    'epoch': epoch + 1,\n                    'model_state_dict': model.state_dict(),\n                    'optimizer_state_dict': optimizer.state_dict(),\n                    'scheduler_state_dict': scheduler.state_dict(),\n                    'best_map': best_map,\n                    'train_losses': self.train_losses,\n                    'val_losses': self.val_losses,\n                    'train_maps': self.train_maps,\n                    'val_maps': self.val_maps,\n                    'hyperparameters': self.hyperparameters\n                }, best_model_path)\n                print(f\"  新的最佳模型已保存: {best_model_path}\")\n            \n            # 定期保存checkpoint\n            if (epoch + 1) % 10 == 0:\n                checkpoint_path = os.path.join(self.save_dir, f'detection_checkpoint_epoch_{epoch+1}.pth')\n                save_checkpoint({\n                    'epoch': epoch + 1,\n                    'model_state_dict': model.state_dict(),\n                    'optimizer_state_dict': optimizer.state_dict(),\n                    'scheduler_state_dict': scheduler.state_dict(),\n                    'best_map': best_map,\n                    'train_losses': self.train_losses,\n                    'val_losses': self.val_losses,\n                    'train_maps': self.train_maps,\n                    'val_maps': self.val_maps,\n                    'hyperparameters': self.hyperparameters\n                }, checkpoint_path)\n        \n        print(f\"训练完成！最佳验证mAP: {best_map:.4f}\")\n        \n        return best_map\n\n\ndef main():\n    \"\"\"主函数：单独运行检测训练\"\"\"\n    # 加载配置\n    hyperparameters = load_hyperparameters()\n    \n    # VOC数据配置\n    voc_config = {\n        'voc_data_path': './data/VOC2012',\n        'batch_size': 8,\n        'backbone_lr': 0.0001,  # backbone较小学习率\n        'detection_lr': 0.001,  # 检测头较大学习率\n        'num_classes': 20\n    }\n    \n    # 预训练backbone路径（需要先运行分类训练）\n    backbone_path = './checkpoints/classification/trained_backbone.pth'\n    \n    if not os.path.exists(backbone_path):\n        print(f\"错误：找不到预训练backbone文件: {backbone_path}\")\n        print(\"请先运行 Train_Classification.py 完成分类预训练\")\n        return\n    \n    # 创建训练器\n    trainer = DetectionTrainer(\n        hyperparameters=hyperparameters,\n        save_dir='./checkpoints/detection'\n    )\n    \n    # 开始训练\n    best_map = trainer.train(\n        voc_config=voc_config,\n        backbone_path=backbone_path,\n        epochs=50,\n        freeze_epochs=10,  # 前10个epoch冻结backbone\n        resume_from=None  # 如果要恢复训练，指定checkpoint路径\n    )\n    \n    print(f\"检测训练完成！\")\n    print(f\"最佳mAP: {best_map:.4f}\")\n\n\nif __name__ == \"__main__\":\n    main()
+def main():
+    """主函数：单独运行检测训练"""
+    # 加载配置
+    hyperparameters = load_hyperparameters()
+    
+    # 检查数据路径并提供灵活的配置选项
+    possible_voc_paths = [
+        '../data/VOC2012/VOCdevkit',  # 标准路径
+        '../data/VOC2012',           # 如果VOCdevkit直接在VOC2012下
+        './data/VOC2012/VOCdevkit',  # 相对于当前目录
+        './data/VOC2012',
+        '../data/VOCdevkit',         # 如果VOCdevkit直接在data下
+    ]
+    
+    voc_data_path = None
+    for path in possible_voc_paths:
+        if os.path.exists(path):
+            voc_data_path = path
+            print(f"✅ 找到VOC数据路径: {path}")
+            break
+    
+    if voc_data_path is None:
+        print("❌ 未找到VOC数据集，请检查以下路径:")
+        for path in possible_voc_paths:
+            print(f"   - {path}")
+        print("\n💡 提示: 请确保VOC数据集的目录结构如下:")
+        print("   data/VOC2012/VOCdevkit/")
+        print("   ├── VOC2007/")
+        print("   │   ├── JPEGImages/")
+        print("   │   └── Annotations/")
+        print("   └── VOC2012/")
+        print("       ├── JPEGImages/")
+        print("       └── Annotations/")
+        return
+    
+    # VOC数据配置
+    voc_config = {
+        'voc_data_path': voc_data_path,
+        'batch_size': 8,
+        'backbone_lr': 0.0001,  # backbone较小学习率
+        'detection_lr': 0.001,  # 检测头较大学习率
+        'num_classes': 20
+    }
+    
+    # 预训练backbone路径（需要先运行分类训练）
+    backbone_path = './checkpoints/classification/trained_backbone.pth'
+    
+    if not os.path.exists(backbone_path):
+        print(f"错误：找不到预训练backbone文件: {backbone_path}")
+        print("请先运行 Train_Classification.py 完成分类预训练")
+        return
+    
+    # 创建训练器
+    trainer = DetectionTrainer(
+        hyperparameters=hyperparameters,
+        save_dir='./checkpoints/detection'
+    )
+    
+    # 开始训练
+    best_map = trainer.train(
+        voc_config=voc_config,
+        backbone_path=backbone_path,
+        epochs=50,
+        freeze_epochs=10,  # 前10个epoch冻结backbone
+        resume_from=None  # 如果要恢复训练，指定checkpoint路径
+    )
+    
+    print(f"检测训练完成！")
+    print(f"最佳mAP: {best_map:.4f}")
+
+
+if __name__ == "__main__":
+    main()
