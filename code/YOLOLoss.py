@@ -79,30 +79,31 @@ class YOLOLoss(nn.Module):
         """计算坐标损失"""
         # 选择最佳预测框 (IoU最高的)
         best_box_indices = self._find_best_boxes(pred_boxes, target_boxes, obj_mask)
-        
+
         coord_loss = 0.0
-        
+
         for i in range(self.num_boxes):
             box_mask = (best_box_indices == i) & obj_mask
-            
+
             if box_mask.sum() > 0:
-                pred_xy = pred_boxes[box_mask, i, :2]
-                pred_wh = pred_boxes[box_mask, i, 2:4]
-                target_xy = target_boxes[box_mask, :2]
-                target_wh = target_boxes[box_mask, 2:4]
-                
+                # 正确的索引方式：先选择box维度，再应用mask
+                pred_xy = pred_boxes[..., i, :2][box_mask]
+                pred_wh = pred_boxes[..., i, 2:4][box_mask]
+                target_xy = target_boxes[..., :2][box_mask]
+                target_wh = target_boxes[..., 2:4][box_mask]
+
                 # 坐标损失 (x, y)
                 xy_loss = F.mse_loss(pred_xy, target_xy, reduction='sum')
-                
+
                 # 宽高损失 (w, h) - 使用平方根
                 wh_loss = F.mse_loss(
                     torch.sqrt(torch.clamp(pred_wh, min=0)),
                     torch.sqrt(target_wh),
                     reduction='sum'
                 )
-                
+
                 coord_loss += xy_loss + wh_loss
-        
+
         return coord_loss
     
     def _compute_confidence_loss(self, pred_boxes, target_boxes, obj_mask, noobj_mask):
@@ -115,18 +116,19 @@ class YOLOLoss(nn.Module):
         
         for i in range(self.num_boxes):
             box_mask = (best_box_indices == i) & obj_mask
-            
             if box_mask.sum() > 0:
-                pred_conf = pred_boxes[box_mask, i, 4]
-                target_conf = target_boxes[box_mask, 4]
+                pred_conf = pred_boxes[..., i, 4][box_mask]
+                target_conf = target_boxes[..., 4][box_mask]
                 conf_loss_obj += F.mse_loss(pred_conf, target_conf, reduction='sum')
         
         # 无目标的置信度损失
         if noobj_mask.sum() > 0:
             for i in range(self.num_boxes):
-                pred_conf = pred_boxes[noobj_mask, i, 4]
-                target_conf = torch.zeros_like(pred_conf)
-                conf_loss_noobj += F.mse_loss(pred_conf, target_conf, reduction='sum')
+                pred_conf_noobj = pred_boxes[..., i, 4][noobj_mask]
+                target_conf_noobj = torch.zeros_like(pred_conf_noobj)
+                conf_loss_noobj += F.mse_loss(pred_conf_noobj, target_conf_noobj, reduction='sum')
+        
+        return conf_loss_obj, conf_loss_noobj
         
         return conf_loss_obj, conf_loss_noobj
     
@@ -138,7 +140,6 @@ class YOLOLoss(nn.Module):
             class_loss = F.mse_loss(pred_cls, target_cls, reduction='sum')
         else:
             class_loss = torch.tensor(0.0, device=pred_classes.device)
-        
         return class_loss
     
     def _find_best_boxes(self, pred_boxes, target_boxes, obj_mask):
