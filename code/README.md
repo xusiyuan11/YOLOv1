@@ -90,11 +90,12 @@ python main.py demo
   },
   "stage2_voc_detection": {
     "description": "阶段2: VOC目标检测微调",
-    "voc2007_train_images": "../data/VOC2012/VOCdevkit/VOC2007/JPEGImages",
-    "voc2007_train_annotations": "../data/VOC2012/VOCdevkit/VOC2007/Annotations",
-    "voc2012_train_images": "../data/VOC2012/VOCdevkit/VOC2012/JPEGImages",
-    "voc2012_train_annotations": "../data/VOC2012/VOCdevkit/VOC2012/Annotations",
-    "epochs": 80,
+    "voc_data_path": "../data/VOC2012",
+    "use_voc2007": true,
+    "use_voc2012": true,
+    "train_val_split": 0.8,
+    "class_file": "./voc_classes.txt",
+    "epochs": 20,
     "batch_size": 8,
     "learning_rate": 0.0001
   },
