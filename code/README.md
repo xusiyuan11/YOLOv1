@@ -12,11 +12,10 @@
 
 ```
 code/
-├── main.py                   # 主程序入口（兼容性保留）
-├── Train_Complete.py         # 新：完整两阶段训练控制器
-├── Train_Classification.py  #  新：阶段1分类预训练
-├── Train_Detection.py       #  新：阶段2检测训练
-├── Train.py                  # 原始两阶段训练脚本（保留）
+├── main.py                   # 主程序入口
+├── Train_Complete.py         # 完整两阶段训练控制器
+├── Train_Classification.py  #  阶段1分类预训练
+├── Train_Detection.py       #  阶段2检测训练
 ├── two_stage_config.json     # 两阶段训练配置文件
 ├── backbone.py               # DarkNet骨干网络（含轻量化版本）
 ├── NetModel.py              # YOLO网络模型
@@ -45,9 +44,6 @@ python Train_Detection.py       # 阶段2：检测训练
 # 选择 2 - 仅分类预训练
 # 选择 3 - 仅检测训练
 
-
-# 原始训练方式
-python main.py train
 
 # 测试和可视化
 python main.py test --checkpoint model.pth
