@@ -4,4 +4,4 @@ YOLO框架通过其革命性的“单次检测”思想，彻底改变了目标�
 
 本项目旨在完成YOLO系列目标检测算法的代码复现、训练优化与模型部署，并提供一个可交互的演示系统。项目功能主要包括数据处理、模型训练、模型评估、推理部署以及系统管理五大功能模块。
 
-![项目概述图](https://github.com/xusiyuan11/YOLOv1/blob/main/项目概述图.png?raw=true)
+![项目概述图](https://github.com/xusiyuan11/YOLOv1/blob/main/图片资源/项目概述图.png?raw=true)
