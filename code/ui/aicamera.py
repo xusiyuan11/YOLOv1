@@ -153,6 +153,7 @@ class CameraVideoHandler:
 
             qt_img = QImage(rgb_image.data, w, h, c * w, QImage.Format_RGB888)
             qt_pm = QPixmap.fromImage(qt_img)
+            # 保持宽高比，居中显示
             scaled_pixmap = qt_pm.scaled(self.lbl_video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.lbl_video.setPixmap(scaled_pixmap)
         except Exception as e:
@@ -172,6 +173,7 @@ class CameraVideoHandler:
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
 
             pixmap = QPixmap.fromImage(qt_image)
+            # 保持宽高比，居中显示，防止变形
             scaled_pixmap = pixmap.scaled(self.lbl_video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.lbl_video.setPixmap(scaled_pixmap)
             self.console.append("✅ 图像显示成功")
@@ -182,7 +184,9 @@ class CameraVideoHandler:
             return False
 
     def display_video_frame(self, qt_image):
+        """显示视频帧"""
         pixmap = QPixmap.fromImage(qt_image)
+        # 保持宽高比，居中显示，防止变形
         scaled_pixmap = pixmap.scaled(self.lbl_video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.lbl_video.setPixmap(scaled_pixmap)
 
