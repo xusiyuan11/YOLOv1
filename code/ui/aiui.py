@@ -15,7 +15,7 @@ class AutonomousDrivingUISetup:
 
     def setup_ui(self):
         """设置用户界面"""
-        self.setWindowTitle("🚗 自动驾驶目标检测系统 v2.0")
+        self.setWindowTitle("🔎 通用目标检测系统 v2.0")
         self.setGeometry(100, 100, 1200, 900)  # 增加窗口高度确保内容显示完整
         self.setMinimumSize(1000, 800)  # 设置最小尺寸，允许用户调整
 
@@ -319,7 +319,7 @@ class AutonomousDrivingUISetup:
         weight_layout.addWidget(weight_label)
 
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["YOLOv8 (自动驾驶优化版)", "YOLOv5 (标准版)", "YOLOv7 (快速版)", "自定义模型"])
+        self.model_combo.addItems(["YOLOv5 (标准版)"])
         self.model_combo.setCurrentIndex(0)
         self.model_combo.setFixedHeight(35)  # 固定高度
         weight_layout.addWidget(self.model_combo)
@@ -386,6 +386,35 @@ class AutonomousDrivingUISetup:
         """)
         self.iou_button.clicked.connect(self.open_iou_dialog)
         params_button_layout.addWidget(self.iou_button)
+
+        # 性能设置按钮
+        self.perf_button = QPushButton("⚙️ 性能设置")
+        self.perf_button.setFixedSize(120, 60)
+        self.perf_button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #34495e, stop: 1 #2c3e50);
+                color: white;
+                font-size: 11px;
+                font-weight: bold;
+                border-radius: 10px;
+                padding: 8px;
+                text-align: center;
+                border: 2px solid #2c3e50;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #5d6d7e, stop: 1 #34495e);
+                border: 2px solid #3498db;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #2c3e50, stop: 1 #212f3d);
+                border: 2px solid #2c3e50;
+            }
+        """)
+        self.perf_button.clicked.connect(self.open_performance_dialog)
+        params_button_layout.addWidget(self.perf_button)
         
         model_layout.addLayout(params_button_layout)
 
@@ -514,6 +543,7 @@ class AutonomousDrivingUISetup:
         self.conf_spin.valueChanged.connect(lambda v: self.conf_slider.setValue(int(v * 100)))
         self.conf_slider.valueChanged.connect(lambda v: self.conf_spin.setValue(v / 100.0))
         self.conf_spin.valueChanged.connect(lambda v: current_label.setText(f"当前值: {v:.2f}"))
+        self.conf_spin.valueChanged.connect(self._apply_thresholds_to_model)
         
         button_box.accepted.connect(lambda: self.apply_confidence_value(dialog))
         button_box.rejected.connect(dialog.reject)
@@ -527,6 +557,145 @@ class AutonomousDrivingUISetup:
         self.confidence_value = self.conf_spin.value()
         self.conf_button.setText(f"🎯 置信度阈值\n{self.confidence_value:.2f}")
         dialog.accept()
+
+    def open_performance_dialog(self):
+        """打开性能设置弹窗（帧跳过数、推理尺寸、推理限频）"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("⚙️ 性能设置")
+        dialog.setFixedSize(420, 360)
+        dialog.setStyleSheet("""
+            QDialog { background: #ffffff; border-radius: 10px; }
+            QLabel { color: #2c3e50; font-weight: bold; }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(14)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 当前值
+        current_frame_skip = int(getattr(self, 'frame_skip', 2))
+        current_infer_size = int(getattr(self, 'infer_size', 512))
+        current_interval = int(getattr(self, 'infer_interval_ms', 150))
+        current_target_fps = int(getattr(self, 'target_fps', 30))
+
+        # 帧跳过数
+        row1 = QHBoxLayout()
+        lbl1 = QLabel("帧跳过数 (frame_skip):")
+        row1.addWidget(lbl1)
+        self.spin_frame_skip = QDoubleSpinBox()
+        self.spin_frame_skip.setRange(1, 10)
+        self.spin_frame_skip.setDecimals(0)
+        self.spin_frame_skip.setSingleStep(1)
+        self.spin_frame_skip.setValue(current_frame_skip)
+        self.spin_frame_skip.setFixedSize(110, 35)
+        row1.addWidget(self.spin_frame_skip)
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        # 推理分辨率
+        row2 = QHBoxLayout()
+        lbl2 = QLabel("推理尺寸 (infer_size):")
+        row2.addWidget(lbl2)
+        self.combo_infer_size = QComboBox()
+        self.combo_infer_size.addItems(["384", "416", "480", "512", "576", "640"])
+        # 设为当前值
+        idx = max(0, self.combo_infer_size.findText(str(current_infer_size)))
+        self.combo_infer_size.setCurrentIndex(idx)
+        self.combo_infer_size.setFixedHeight(35)
+        row2.addWidget(self.combo_infer_size)
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        # 推理限频
+        row3 = QHBoxLayout()
+        lbl3 = QLabel("最小推理间隔 (ms):")
+        row3.addWidget(lbl3)
+        self.spin_interval = QDoubleSpinBox()
+        self.spin_interval.setRange(0, 1000)
+        self.spin_interval.setDecimals(0)
+        self.spin_interval.setSingleStep(10)
+        self.spin_interval.setValue(current_interval)
+        self.spin_interval.setFixedSize(110, 35)
+        row3.addWidget(self.spin_interval)
+        row3.addStretch()
+        layout.addLayout(row3)
+
+        # 目标帧率
+        row4 = QHBoxLayout()
+        lbl4 = QLabel("目标帧率 (10-40):")
+        row4.addWidget(lbl4)
+        self.spin_target_fps = QDoubleSpinBox()
+        self.spin_target_fps.setRange(10, 40)
+        self.spin_target_fps.setDecimals(0)
+        self.spin_target_fps.setSingleStep(1)
+        self.spin_target_fps.setValue(min(40, max(10, current_target_fps)))
+        self.spin_target_fps.setFixedSize(110, 35)
+        row4.addWidget(self.spin_target_fps)
+        row4.addStretch()
+        layout.addLayout(row4)
+
+        # 按钮
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #3498db, stop: 1 #2980b9);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #5dade2, stop: 1 #3498db);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 #2980b9, stop: 1 #1f618d);
+            }
+        """)
+        button_box.accepted.connect(lambda: self.apply_performance_settings(dialog))
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        dialog.exec_()
+
+    def apply_performance_settings(self, dialog):
+        """应用性能设置到实时检测流程"""
+        try:
+            new_frame_skip = int(self.spin_frame_skip.value())
+            new_infer_size = int(self.combo_infer_size.currentText())
+            new_interval = int(self.spin_interval.value())
+            new_target_fps = int(self.spin_target_fps.value())
+
+            self.frame_skip = max(1, new_frame_skip)
+            self.infer_size = max(256, new_infer_size)
+            self.infer_interval_ms = max(0, new_interval)
+            self.target_fps = min(40, max(10, new_target_fps))
+            # 同步UI刷新节流
+            try:
+                self.ui_min_update_interval_ms = max(1, int(1000 / self.target_fps))
+            except Exception:
+                pass
+
+            # 同步到摄像头与视频线程（若在运行）
+            try:
+                if hasattr(self, 'real_camera') and self.real_camera:
+                    self.real_camera.set_target_fps(self.target_fps)
+                if hasattr(self, 'video_thread') and self.video_thread:
+                    self.video_thread.set_fps(self.target_fps)
+            except Exception:
+                pass
+
+            if hasattr(self, 'console'):
+                self.console.append(f"⚙️ 已更新性能设置：frame_skip={self.frame_skip}, infer_size={self.infer_size}, interval={self.infer_interval_ms}ms, fps={self.target_fps}")
+        except Exception as e:
+            if hasattr(self, 'console'):
+                self.console.append(f"❌ 性能设置应用失败: {str(e)}")
+        finally:
+            dialog.accept()
 
     def open_iou_dialog(self):
         """打开交并比阈值调整弹窗"""
@@ -647,6 +816,7 @@ class AutonomousDrivingUISetup:
         self.iou_spin.valueChanged.connect(lambda v: self.iou_slider.setValue(int(v * 100)))
         self.iou_slider.valueChanged.connect(lambda v: self.iou_spin.setValue(v / 100.0))
         self.iou_spin.valueChanged.connect(lambda v: current_label.setText(f"当前值: {v:.2f}"))
+        self.iou_spin.valueChanged.connect(self._apply_thresholds_to_model)
         
         button_box.accepted.connect(lambda: self.apply_iou_value(dialog))
         button_box.rejected.connect(dialog.reject)
@@ -660,6 +830,17 @@ class AutonomousDrivingUISetup:
         self.iou_value = self.iou_spin.value()
         self.iou_button.setText(f"📐 交并比阈值\n{self.iou_value:.2f}")
         dialog.accept()
+
+    def _apply_thresholds_to_model(self, *args):
+        """阈值变更时同步到YOLO模型（若已加载）"""
+        try:
+            if hasattr(self, 'model') and self.model is not None:
+                if hasattr(self, 'confidence_value'):
+                    self.model.conf = float(self.confidence_value)
+                if hasattr(self, 'iou_value'):
+                    self.model.iou = float(self.iou_value)
+        except Exception:
+            pass
 
 
     def create_input_group(self):
@@ -851,34 +1032,8 @@ class AutonomousDrivingUISetup:
         """)
         
         # 设置初始检测信息
-        initial_text = """
-🔍 自动驾驶目标检测系统 v2.0
-═══════════════════════════════════════
-
-📊 系统状态: 待机中
-🎯 检测目标: 0 个
-⏱️ 推理时间: 0 ms
-📈 处理帧率: 0 FPS
-📶 处理进度: 0%
-
-🏷️ 检测类别统计:
-   🚗 车辆: 0
-   🚶 行人: 0  
-   🚦 交通灯: 0
-   🚧 标志牌: 0
-   🚌 公交车: 0
-   🚛 卡车: 0
-   🏍️ 摩托车: 0
-   🚲 自行车: 0
-
-📋 最近检测结果:
-   暂无检测数据
-
-💡 系统提示:
-   请选择输入源开始检测
-        """
-        
-        self.detection_info.setPlainText(initial_text.strip())
+        # 默认不显示任何内容，等待检测开始后由推理线程逐条追加
+        self.detection_info.setPlainText("")
         self.detection_info.setReadOnly(True)  # 设为只读
         info_layout.addWidget(self.detection_info)
 

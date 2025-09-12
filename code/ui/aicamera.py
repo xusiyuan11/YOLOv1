@@ -17,6 +17,7 @@ class AICamera(QThread):
         super(AICamera, self).__init__()
         self.camera = None
         self.isrunning = False
+        self.target_fps = 30
         self.init_camera()
 
     def init_camera(self):
@@ -52,7 +53,9 @@ class AICamera(QThread):
             else:
                 print("摄像头读取错误")
                 break
-            QThread.usleep(33000)  # 约30fps
+            # 根据目标fps动态睡眠
+            sleep_us = max(1, int(1_000_000 / max(1, int(self.target_fps))))
+            QThread.usleep(sleep_us)
 
         print("摄像头线程结束")
 
@@ -61,9 +64,12 @@ class AICamera(QThread):
         print("正在关闭摄像头...")
         self.isrunning = False
 
-        if self.isRunning():
-            self.quit()
-            self.wait(3000)
+        try:
+            if self.isRunning():
+                self.quit()
+                self.wait(3000)
+        except Exception:
+            pass
 
         if self.camera and self.camera.isOpened():
             self.camera.release()
@@ -74,16 +80,26 @@ class AICamera(QThread):
         """检查摄像头是否可用"""
         return self.camera is not None and self.camera.isOpened()
 
+    def set_target_fps(self, fps: int):
+        try:
+            fps = int(fps)
+            if fps < 1:
+                fps = 1
+            self.target_fps = fps
+        except Exception:
+            pass
+
 
 class VideoThread(QThread):
     """视频播放线程"""
     frame_signal = pyqtSignal(QImage)
     finished_signal = pyqtSignal()
 
-    def __init__(self, video_path):
+    def __init__(self, video_path, fps: int = 30):
         super().__init__()
         self.video_path = video_path
         self.running = False
+        self.fps = int(fps) if fps and fps > 0 else 30
 
     def run(self):
         self.running = True
@@ -100,13 +116,24 @@ class VideoThread(QThread):
             qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
 
             self.frame_signal.emit(qt_image)
-            QThread.msleep(33)  # 约30fps
+            # 根据设定fps动态睡眠
+            sleep_ms = max(1, int(1000 / max(1, self.fps)))
+            QThread.msleep(sleep_ms)
 
         cap.release()
         self.finished_signal.emit()
 
     def stop(self):
         self.running = False
+
+    def set_fps(self, fps: int):
+        try:
+            fps = int(fps)
+            if fps < 1:
+                fps = 1
+            self.fps = fps
+        except Exception:
+            pass
 
 
 class CameraVideoHandler:
@@ -192,10 +219,13 @@ class CameraVideoHandler:
 
     def start_video_playback(self, video_path):
         if self.video_thread:
-            self.video_thread.stop()
-            self.video_thread.wait()
+            try:
+                self.video_thread.stop()
+                self.video_thread.wait()
+            except Exception:
+                pass
 
-        self.video_thread = VideoThread(video_path)
+        self.video_thread = VideoThread(video_path, fps=getattr(self, 'target_fps', 30))
         self.video_thread.frame_signal.connect(self.display_video_frame)
         self.video_thread.finished_signal.connect(self.on_video_finished)
         self.video_thread.start()
