@@ -428,12 +428,13 @@ class AutonomousDrivingUISetup:
         """打开置信度阈值调整弹窗"""
         dialog = QDialog(self)
         dialog.setWindowTitle("🎯 置信度阈值调整")
-        dialog.setFixedSize(400, 250)
+        dialog.setMinimumSize(520, 380)
         dialog.setStyleSheet("""
-            QDialog {
-                background: #ffffff;
-                border-radius: 10px;
-            }
+            QDialog, QDialog * { background: #ffffff; color: #2c3e50; }
+            QLabel { color: #3498db; }
+            QPushButton { background: #3498db; color: #ffffff; border: none; border-radius: 8px; }
+            QPushButton:hover { background: #5dade2; }
+            QPushButton:pressed { background: #2980b9; }
         """)
         
         layout = QVBoxLayout(dialog)
@@ -443,21 +444,21 @@ class AutonomousDrivingUISetup:
         # 标题
         title_label = QLabel("🎯 置信度阈值 (Confidence)")
         title_label.setFont(QFont("Arial", 14, QFont.Bold))
-        title_label.setStyleSheet("color: #2ecc71; text-align: center;")
+        title_label.setStyleSheet("color: #3498db; text-align: center;")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
         
         # 当前值显示
         current_label = QLabel(f"当前值: {self.confidence_value:.2f}")
         current_label.setFont(QFont("Arial", 12))
-        current_label.setStyleSheet("color: #2c3e50; text-align: center;")
+        current_label.setStyleSheet("color: #3498db; text-align: center;")
         current_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(current_label)
         
         # 数值输入
         spin_layout = QHBoxLayout()
         spin_label = QLabel("数值:")
-        spin_label.setStyleSheet("color: #2c3e50; font-weight: bold;")
+        spin_label.setStyleSheet("color: #3498db; font-weight: bold;")
         spin_label.setFixedWidth(50)
         spin_layout.addWidget(spin_label)
         
@@ -468,18 +469,9 @@ class AutonomousDrivingUISetup:
         self.conf_spin.setDecimals(2)
         self.conf_spin.setFixedSize(100, 35)
         self.conf_spin.setStyleSheet("""
-            QDoubleSpinBox {
-                background: #ffffff;
-                color: #2c3e50;
-                border: 2px solid #28a745;
-                border-radius: 8px;
-                padding: 5px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QDoubleSpinBox:focus {
-                border-color: #1e7e34;
-            }
+            QDoubleSpinBox { background: #ffffff; color: #2c3e50; border: 2px solid #3498db; border-radius: 8px; padding: 5px; font-size: 12px; font-weight: bold; }
+            QDoubleSpinBox:focus { border-color: #2980b9; }
+            QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 0px; height: 0px; }
         """)
         spin_layout.addWidget(self.conf_spin)
         spin_layout.addStretch()
@@ -488,7 +480,7 @@ class AutonomousDrivingUISetup:
         # 滑块
         slider_layout = QHBoxLayout()
         slider_label = QLabel("滑块:")
-        slider_label.setStyleSheet("color: #2c3e50; font-weight: bold;")
+        slider_label.setStyleSheet("color: #3498db; font-weight: bold;")
         slider_label.setFixedWidth(50)
         slider_layout.addWidget(slider_label)
         
@@ -497,21 +489,9 @@ class AutonomousDrivingUISetup:
         self.conf_slider.setValue(int(self.confidence_value * 100))
         self.conf_slider.setFixedHeight(30)
         self.conf_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                background: #dee2e6;
-                height: 8px;
-                border-radius: 4px;
-            }
-            QSlider::handle:horizontal {
-                background: #28a745;
-                width: 20px;
-                height: 20px;
-                border-radius: 10px;
-                margin: -6px 0;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #1e7e34;
-            }
+            QSlider::groove:horizontal { background: #dee2e6; height: 8px; border-radius: 4px; }
+            QSlider::handle:horizontal { background: #3498db; width: 20px; height: 20px; border-radius: 10px; margin: -6px 0; }
+            QSlider::handle:horizontal:hover { background: #2980b9; }
         """)
         slider_layout.addWidget(self.conf_slider)
         layout.addLayout(slider_layout)
@@ -549,7 +529,12 @@ class AutonomousDrivingUISetup:
         button_box.rejected.connect(dialog.reject)
         
         layout.addWidget(button_box)
-        
+
+        # 规范 OK/Cancel 尺寸
+        for _btn in button_box.buttons():
+            _btn.setMinimumHeight(40)
+            _btn.setMinimumWidth(110)
+
         dialog.exec_()
 
     def apply_confidence_value(self, dialog):
@@ -562,10 +547,13 @@ class AutonomousDrivingUISetup:
         """打开性能设置弹窗（帧跳过数、推理尺寸、推理限频）"""
         dialog = QDialog(self)
         dialog.setWindowTitle("⚙️ 性能设置")
-        dialog.setFixedSize(420, 360)
+        dialog.setMinimumSize(520, 380)
         dialog.setStyleSheet("""
-            QDialog { background: #ffffff; border-radius: 10px; }
-            QLabel { color: #2c3e50; font-weight: bold; }
+            QDialog, QDialog * { background: #ffffff; color: #2c3e50; }
+            QLabel { color: #3498db; font-weight: bold; }
+            QPushButton { background: #3498db; color: #ffffff; border: none; border-radius: 8px; }
+            QPushButton:hover { background: #5dade2; }
+            QPushButton:pressed { background: #2980b9; }
         """)
 
         layout = QVBoxLayout(dialog)
@@ -636,29 +624,14 @@ class AutonomousDrivingUISetup:
 
         # 按钮
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #3498db, stop: 1 #2980b9);
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 16px;
-                font-weight: bold;
-                min-width: 80px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #5dade2, stop: 1 #3498db);
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #2980b9, stop: 1 #1f618d);
-            }
-        """)
         button_box.accepted.connect(lambda: self.apply_performance_settings(dialog))
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
+
+        # 规范 OK/Cancel 尺寸
+        for _btn in button_box.buttons():
+            _btn.setMinimumHeight(40)
+            _btn.setMinimumWidth(110)
 
         dialog.exec_()
 
@@ -701,12 +674,13 @@ class AutonomousDrivingUISetup:
         """打开交并比阈值调整弹窗"""
         dialog = QDialog(self)
         dialog.setWindowTitle("📐 交并比阈值调整")
-        dialog.setFixedSize(400, 250)
+        dialog.setMinimumSize(520, 380)
         dialog.setStyleSheet("""
-            QDialog {
-                background: #ffffff;
-                border-radius: 10px;
-            }
+            QDialog, QDialog * { background: #ffffff; color: #2c3e50; }
+            QLabel { color: #3498db; }
+            QPushButton { background: #3498db; color: #ffffff; border: none; border-radius: 8px; }
+            QPushButton:hover { background: #5dade2; }
+            QPushButton:pressed { background: #2980b9; }
         """)
         
         layout = QVBoxLayout(dialog)
@@ -716,21 +690,21 @@ class AutonomousDrivingUISetup:
         # 标题
         title_label = QLabel("📐 交并比阈值 (IOU)")
         title_label.setFont(QFont("Arial", 14, QFont.Bold))
-        title_label.setStyleSheet("color: #e74c3c; text-align: center;")
+        title_label.setStyleSheet("color: #3498db; text-align: center;")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
         
         # 当前值显示
         current_label = QLabel(f"当前值: {self.iou_value:.2f}")
         current_label.setFont(QFont("Arial", 12))
-        current_label.setStyleSheet("color: #2c3e50; text-align: center;")
+        current_label.setStyleSheet("color: #3498db; text-align: center;")
         current_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(current_label)
         
         # 数值输入
         spin_layout = QHBoxLayout()
         spin_label = QLabel("数值:")
-        spin_label.setStyleSheet("color: #2c3e50; font-weight: bold;")
+        spin_label.setStyleSheet("color: #3498db; font-weight: bold;")
         spin_label.setFixedWidth(50)
         spin_layout.addWidget(spin_label)
         
@@ -744,15 +718,14 @@ class AutonomousDrivingUISetup:
             QDoubleSpinBox {
                 background: #ffffff;
                 color: #2c3e50;
-                border: 2px solid #dc3545;
+                border: 2px solid #3498db;
                 border-radius: 8px;
                 padding: 5px;
                 font-size: 12px;
                 font-weight: bold;
             }
-            QDoubleSpinBox:focus {
-                border-color: #c82333;
-            }
+            QDoubleSpinBox:focus { border-color: #2980b9; }
+            QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 0px; height: 0px; }
         """)
         spin_layout.addWidget(self.iou_spin)
         spin_layout.addStretch()
@@ -761,7 +734,7 @@ class AutonomousDrivingUISetup:
         # 滑块
         slider_layout = QHBoxLayout()
         slider_label = QLabel("滑块:")
-        slider_label.setStyleSheet("color: #2c3e50; font-weight: bold;")
+        slider_label.setStyleSheet("color: #3498db; font-weight: bold;")
         slider_label.setFixedWidth(50)
         slider_layout.addWidget(slider_label)
         
@@ -776,15 +749,13 @@ class AutonomousDrivingUISetup:
                 border-radius: 4px;
             }
             QSlider::handle:horizontal {
-                background: #dc3545;
+                background: #3498db;
                 width: 20px;
                 height: 20px;
                 border-radius: 10px;
                 margin: -6px 0;
             }
-            QSlider::handle:horizontal:hover {
-                background: #c82333;
-            }
+            QSlider::handle:horizontal:hover { background: #2980b9; }
         """)
         slider_layout.addWidget(self.iou_slider)
         layout.addLayout(slider_layout)
@@ -822,7 +793,12 @@ class AutonomousDrivingUISetup:
         button_box.rejected.connect(dialog.reject)
         
         layout.addWidget(button_box)
-        
+
+        # 规范 OK/Cancel 尺寸
+        for _btn in button_box.buttons():
+            _btn.setMinimumHeight(40)
+            _btn.setMinimumWidth(110)
+
         dialog.exec_()
 
     def apply_iou_value(self, dialog):

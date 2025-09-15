@@ -526,10 +526,10 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
         # 开启检测模式（用于摄像头/视频）
         self.detecting = True
         self._start_infer_thread()
-        # 如勾选保存结果，询问保存路径（视频/摄像头）
+        # 如勾选保存结果，询问图片序列保存文件夹
         if hasattr(self, 'cb_save') and self.cb_save.isChecked():
             if (self.camera_running or (self.video_thread and self.video_thread.isRunning())):
-                self._prompt_save_video_path()
+                self._prompt_save_image_dir()
         if self.camera_running:
             self.console.append("▶️ 已启用摄像头实时检测")
         elif self.video_thread and self.video_thread.isRunning():
@@ -553,8 +553,8 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
         self.detection_info.setPlainText("")
         # 清空叠加帧缓存
         self._last_annotated_qimage = None
-        # 关闭视频写入
-        self._close_video_writer()
+        # 清理保存状态
+        self._clear_save_state()
 
     def closeEvent(self, event):
         """窗口关闭事件"""
@@ -569,9 +569,14 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             return
         if self.infer_thread is None:
             self.infer_thread = InferenceThread(self.model, self.infer_size, self.frame_skip, self.infer_interval_ms)
-            self.infer_thread.frame_ready.connect(self._on_infer_frame_ready)
-            self.infer_thread.meta_ready.connect(self._on_infer_meta_ready)
-            # 设为守护线程，避免进程退出阻塞
+            # 使用QueuedConnection确保跨线程UI信号安全
+            try:
+                from PyQt5.QtCore import Qt as _Qt
+                self.infer_thread.frame_ready.connect(self._on_infer_frame_ready, type=_Qt.QueuedConnection)
+                self.infer_thread.meta_ready.connect(self._on_infer_meta_ready, type=_Qt.QueuedConnection)
+            except Exception:
+                self.infer_thread.frame_ready.connect(self._on_infer_frame_ready)
+                self.infer_thread.meta_ready.connect(self._on_infer_meta_ready)
             try:
                 self.infer_thread.setObjectName("InferenceThread")
             except Exception:
@@ -588,6 +593,15 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             except Exception:
                 pass
             self.infer_thread = None
+    
+    def _clear_save_state(self):
+        try:
+            if hasattr(self, 'save_image_dir'):
+                del self.save_image_dir
+            if hasattr(self, 'save_image_index'):
+                del self.save_image_index
+        except Exception:
+            pass
 
     def _on_infer_frame_ready(self, qt_image: QImage):
         """收到后台推理结果帧，非阻塞更新UI"""
@@ -601,72 +615,50 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
                 self.lbl_video.setPixmap(scaled_pixmap)
                 self._last_ui_update_ms = now_ms
 
-            # 写入视频结果
-            if getattr(self, 'saving_video', False) and getattr(self, 'save_video_path', None):
-                w = qt_image.width()
-                h = qt_image.height()
-                ch = 3
-                bits = qt_image.bits()
-                bits.setsize(h * w * ch)
-                rgb = np.frombuffer(bits, dtype=np.uint8).reshape((h, w, ch))
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                if getattr(self, 'video_writer', None) is None or getattr(self, '_video_writer_size', None) != (w, h):
-                    self._open_video_writer(w, h)
-                if getattr(self, 'video_writer', None) is not None:
-                    self.video_writer.write(bgr)
+            # 写入图片序列
+            if getattr(self, 'save_image_dir', None):
+                try:
+                    w = qt_image.width()
+                    h = qt_image.height()
+                    ch = 3
+                    tmp_img = qt_image.copy()
+                    bits = tmp_img.bits()
+                    bits.setsize(h * w * ch)
+                    rgb = np.frombuffer(bits, dtype=np.uint8).reshape((h, w, ch))
+                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    name = f"frame_{time.strftime('%Y%m%d_%H%M%S')}_{getattr(self, 'save_image_index', 0):06d}.jpg"
+                    cv2.imwrite(os.path.join(self.save_image_dir, name), bgr)
+                    self.save_image_index = getattr(self, 'save_image_index', 0) + 1
+                except Exception:
+                    pass
         except Exception:
             pass
 
-    def _prompt_save_video_path(self):
+    def _prompt_save_image_dir(self):
         try:
-            default_name = time.strftime("%Y%m%d_%H%M%S") + ".mp4"
-            path, _ = QFileDialog.getSaveFileName(self, "保存检测视频为", default_name, "视频文件 (*.mp4 *.avi)")
-            if path:
-                self.save_video_path = path
-                self.saving_video = True
-                self.console.append(f"💾 保存路径: {os.path.basename(path)}")
+            default_dir = os.path.join(os.path.expanduser("~"), "Detections")
+            if not os.path.isdir(default_dir):
+                try:
+                    os.makedirs(default_dir, exist_ok=True)
+                except Exception:
+                    default_dir = os.path.expanduser("~")
+
+            folder = QFileDialog.getExistingDirectory(self, "选择保存图片序列的文件夹", default_dir)
+            if folder:
+                self.save_image_dir = folder
+                self.save_image_index = 0
+                self.console.append(f"💾 保存图片序列到: {folder}")
             else:
-                self.saving_video = False
-                self.save_video_path = None
+                self._clear_save_state()
         except Exception as e:
             self.console.append(f"❌ 选择保存路径失败: {str(e)}")
-            self.saving_video = False
-            self.save_video_path = None
+            self._clear_save_state()
 
     def _open_video_writer(self, w: int, h: int):
-        try:
-            if not getattr(self, 'saving_video', False) or not getattr(self, 'save_video_path', None):
-                return
-            # 关闭旧的
-            self._close_video_writer()
-            # fourcc 根据扩展名选择
-            ext = os.path.splitext(self.save_video_path)[1].lower()
-            if ext == ".avi":
-                fourcc = cv2.VideoWriter_fourcc(*"XVID")
-            else:
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            fps = int(getattr(self, 'target_fps', 20))
-            self.video_writer = cv2.VideoWriter(self.save_video_path, fourcc, max(1, fps), (w, h))
-            self._video_writer_size = (w, h)
-            if not self.video_writer.isOpened():
-                self.console.append("❌ 无法创建视频写入器")
-                self.video_writer = None
-        except Exception as e:
-            self.console.append(f"❌ 创建视频写入器失败: {str(e)}")
-            self.video_writer = None
+        return
 
     def _close_video_writer(self):
-        try:
-            if getattr(self, 'video_writer', None) is not None:
-                self.video_writer.release()
-            if getattr(self, 'save_video_path', None) and getattr(self, 'saving_video', False):
-                self.console.append(f"✅ 已保存视频: {os.path.basename(self.save_video_path)}")
-        except Exception:
-            pass
-        finally:
-            self.video_writer = None
-            self._video_writer_size = None
-            self.saving_video = False
+        return
 
     def _on_infer_meta_ready(self, text: str):
         try:

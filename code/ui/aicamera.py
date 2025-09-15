@@ -113,7 +113,8 @@ class VideoThread(QThread):
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
             bytes_per_line = ch * w
-            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            # 深拷贝，避免引用临时缓冲导致的崩溃
+            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
 
             self.frame_signal.emit(qt_image)
             # 根据设定fps动态睡眠
