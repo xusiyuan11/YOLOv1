@@ -109,7 +109,7 @@ if __name__ == "__main__":
         }
         QScrollBar::handle:vertical {
             background: #3a3a3a;
-            border-radius: 5px;
+            border-radius: 5px; 
             min-height: 24px;
         }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }

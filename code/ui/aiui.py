@@ -311,18 +311,30 @@ class AutonomousDrivingUISetup:
         model_layout.setContentsMargins(10, 10, 10, 10)
 
         # 权重选择
-        weight_layout = QHBoxLayout()
-        weight_label = QLabel("模型权重:")
-        weight_label.setFont(QFont("Arial", 11, QFont.Bold))
-        weight_label.setStyleSheet("color: #3498db;")
-        weight_label.setFixedWidth(80)  # 固定标签宽度
-        weight_layout.addWidget(weight_label)
+        weight_layout = QVBoxLayout()
+        # 移除“模型系列”模块
 
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(["YOLOv5 (标准版)"])
-        self.model_combo.setCurrentIndex(0)
-        self.model_combo.setFixedHeight(35)  # 固定高度
-        weight_layout.addWidget(self.model_combo)
+        # 第二行：权重选择按钮 + 当前选择展示
+        row_weight = QHBoxLayout()
+        lbl_weight = QLabel("模型权重:")
+        lbl_weight.setFont(QFont("Arial", 11, QFont.Bold))
+        lbl_weight.setStyleSheet("color: #3498db;")
+        lbl_weight.setFixedWidth(80)
+        row_weight.addWidget(lbl_weight)
+
+        self.btn_select_weight = QPushButton("选择")
+        self.btn_select_weight.setFixedHeight(35)
+        self.btn_select_weight.setStyleSheet("QPushButton { background: #3498db; color: white; border: none; border-radius: 8px; padding: 6px 14px; } QPushButton:hover { background: #5dade2; }")
+        row_weight.addWidget(self.btn_select_weight)
+
+        self.lbl_weight_path = QLabel("未选择权重")
+        self.lbl_weight_path.setStyleSheet("color: #2c3e50;")
+        self.lbl_weight_path.setWordWrap(True)
+        row_weight.addWidget(self.lbl_weight_path, 1)
+
+        row_weight.addStretch()
+        weight_layout.addLayout(row_weight)
+
         model_layout.addLayout(weight_layout)
 
         # 参数设置按钮布局
