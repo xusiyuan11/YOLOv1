@@ -35,6 +35,8 @@ class InferenceThread(QThread):
         self._last_infer_ms = 0
         self._frame_index = 0
         self._latest_frame = None  # BGR np.ndarray
+        # v1 推理上下文（预处理/解码所需参数与函数）
+        self.v1_ctx = None
 
     def update_params(self, infer_size: int = None, frame_skip: int = None, interval_ms: int = None, conf: float = None, iou: float = None, model_type: str = None):
         if infer_size is not None:
@@ -49,6 +51,17 @@ class InferenceThread(QThread):
             self.iou = float(iou)
         if model_type is not None:
             self.model_type = 'v8' if (str(model_type).lower().find('v8') != -1 or str(model_type).lower().find('8') != -1) else 'v5'
+
+    def set_v1_context(self, input_size: int, grid_size: int, num_classes: int, class_names, decode_func, device: str):
+        """为 YOLOv1 设置预处理与后处理上下文。"""
+        self.v1_ctx = {
+            'input_size': int(input_size),
+            'grid_size': int(grid_size),
+            'num_classes': int(num_classes),
+            'class_names': class_names,
+            'decode_func': decode_func,
+            'device': device,
+        }
 
     def submit_frame(self, frame_bgr):
         # 确保持有独立副本，避免引用临时缓冲导致崩溃
@@ -104,8 +117,8 @@ class InferenceThread(QThread):
                                     self.meta_ready.emit("\n".join(lines))
                             except Exception:
                                 pass
-                        else:
-                            # YOLOv5 推理
+                        elif self.model_type in ('v5', 'v3'):
+                            # YOLOv5/YOLOv3 推理（相同结果接口）
                             results = self.model(frame, size=int(self.infer_size))
                             annotated_bgr = results.render()[0]
                             names = getattr(results, 'names', getattr(self.model, 'names', {}))
@@ -125,6 +138,75 @@ class InferenceThread(QThread):
                                     self.meta_ready.emit("\n".join(lines))
                             except Exception:
                                 pass
+                        elif self.model_type == 'v1' and self.v1_ctx is not None:
+                            # YOLOv1 推理
+                            try:
+                                ctx = self.v1_ctx
+                                input_size = ctx['input_size']
+                                # 预处理：RGB、方形填充、缩放、归一化
+                                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                h0, w0 = rgb.shape[:2]
+                                max_edge = max(h0, w0)
+                                top = (max_edge - h0) // 2
+                                bottom = max_edge - h0 - top
+                                left = (max_edge - w0) // 2
+                                right = max_edge - w0 - left
+                                padded = cv2.copyMakeBorder(rgb, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                                resized = cv2.resize(padded, (input_size, input_size))
+                                tensor = torch.from_numpy(resized).float().permute(2, 0, 1) / 255.0
+                                mean = torch.tensor([0.408, 0.448, 0.471]).view(3, 1, 1)
+                                std = torch.tensor([0.242, 0.239, 0.234]).view(3, 1, 1)
+                                tensor = (tensor - mean) / std
+                                tensor = tensor.unsqueeze(0).to(ctx['device'])
+
+                                # 前向
+                                preds = self.model(tensor)
+                                decoded_list = ctx['decode_func'](
+                                    preds.detach().cpu(),
+                                    conf_threshold=float(self.confidence),
+                                    nms_threshold=float(self.iou),
+                                    input_size=input_size,
+                                    grid_size=int(ctx['grid_size']),
+                                    num_classes=int(ctx['num_classes'])
+                                )
+                                det = decoded_list[0]
+                                boxes = det.get('boxes', None)
+                                scores = det.get('scores', None)
+                                cls_ids = det.get('class_ids', None)
+
+                                # 坐标反变换回原图
+                                if boxes is not None and len(boxes) > 0:
+                                    scale = max_edge / input_size
+                                    boxes = boxes.copy() * scale
+                                    boxes[:, [0, 2]] -= left
+                                    boxes[:, [1, 3]] -= top
+                                    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, w0)
+                                    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h0)
+
+                                # 叠加可视化
+                                annotated_bgr = frame.copy()
+                                names = ctx['class_names'] if isinstance(ctx['class_names'], (list, tuple)) else []
+                                lines = []
+                                if boxes is not None and len(boxes) > 0:
+                                    count = boxes.shape[0]
+                                    for i in range(count):
+                                        x1, y1, x2, y2 = [int(v) for v in boxes[i].tolist()]
+                                        conf_v = float(scores[i]) if scores is not None else 0.0
+                                        cls_v = int(cls_ids[i]) if cls_ids is not None else 0
+                                        label = names[cls_v] if isinstance(names, (list, tuple)) and 0 <= cls_v < len(names) else f'class{cls_v}'
+                                        cv2.rectangle(annotated_bgr, (x1, y1), (x2, y2), (0, 200, 255), 2)
+                                        cv2.putText(annotated_bgr, f"{label} {conf_v:.2f}", (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+                                        ts_ms = int(time.time() * 1000)
+                                        ts = time.strftime("%H:%M:%S", time.localtime(ts_ms / 1000)) + f".{ts_ms % 1000:03d}"
+                                        lines.append(f"{i + 1}. 时间 {ts} | 类别 {label} | 位置 ({x1},{y1},{x2},{y2}) | 置信度 {conf_v:.2f}")
+                                if lines:
+                                    self.meta_ready.emit("\n".join(lines))
+                            except Exception:
+                                # 若v1流程异常，不阻塞整体线程
+                                annotated_bgr = frame
+                        else:
+                            # 未知模型类型，直接跳过
+                            annotated_bgr = frame
 
                     annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
                     h, w, ch = annotated_rgb.shape
@@ -279,14 +361,29 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             os.path.join(base_dir, '_internal', 'YOLOv5', 'yolov5-master'),
             os.path.join(base_dir, '_internal', 'YOLOv5'),
         ]
-        # 仅当目录内含 hubconf.py 才视为有效 YOLOv5 本地仓库
-        yolo_repo = next((p for p in v5_repo_candidates if os.path.isfile(os.path.join(p, 'hubconf.py'))), None)
+        # v3 仓库候选
+        v3_repo_candidates = [
+            os.path.join(base_dir, 'YOLOv3'),
+            os.path.join(base_dir, 'yolov3'),
+            os.path.join(base_dir, '_internal', 'YOLOv3'),
+        ]
+        # v1 仓库候选
+        v1_repo_candidates = [
+            os.path.join(base_dir, 'YOLOv1'),
+            os.path.join(base_dir, 'yolov1'),
+            os.path.join(base_dir, '_internal', 'YOLOv1'),
+        ]
+        # 仅当目录内含 hubconf.py 才视为有效 YOLOv5/YOLOv3 本地仓库
+        v5_repo = next((p for p in v5_repo_candidates if os.path.isfile(os.path.join(p, 'hubconf.py'))), None)
+        v3_repo = next((p for p in v3_repo_candidates if os.path.isfile(os.path.join(p, 'hubconf.py'))), None)
+        # v1 仅需存在核心模块文件判定
+        v1_repo = next((p for p in v1_repo_candidates if os.path.isfile(os.path.join(p, 'NetModel.py'))), None)
         # 避免 torch.hub 缓存导致加载旧代码，强制本地优先时可关闭缓存
         try:
             torch.hub.set_dir(os.path.join(base_dir, '.torchhub'))
         except Exception:
             pass
-        if yolo_repo is None:
+        if v5_repo is None:
             self.console.append("⚠️ 未找到本地YOLOv5仓库，将尝试联网加载（可能较慢）")
 
         # 使用按钮选择的权重路径
@@ -297,6 +394,8 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
         # 先基于路径名做偏好判断；若不确定则自动尝试
         prefer_v8 = ('yolov8' in path_lower) or ('v8' in sp_lower)
         prefer_v5 = ('yolov5' in path_lower) or ('v5' in sp_lower)
+        prefer_v3 = ('yolov3' in path_lower) or ('v3' in sp_lower)
+        prefer_v1 = ('yolov1' in path_lower) or ('v1' in sp_lower)
 
         try:
             self.console.append(f"🧩 Torch 版本: {getattr(torch, '__version__', 'unknown')}")
@@ -312,33 +411,146 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
 
             model = None
 
-            # 定义四种加载器（v1/v3 先按 v8 尝试，失败再按 v5）
+            # 定义加载器（先尝试 v8，失败再尝试 v5；若指定 forced 则按指定加载）
             def _try_load_v8(p):
                 from ultralytics import YOLO
                 return YOLO(p)
 
             def _try_load_v5(p):
-                if yolo_repo and os.path.isdir(yolo_repo):
+                if v5_repo and os.path.isdir(v5_repo):
                     try:
-                        return torch.hub.load(yolo_repo, 'custom', path=p, source='local', trust_repo=True)
+                        return torch.hub.load(v5_repo, 'custom', path=p, source='local', trust_repo=True)
                     except TypeError:
-                        return torch.hub.load(yolo_repo, 'custom', path=p, source='local')
+                        return torch.hub.load(v5_repo, 'custom', path=p, source='local')
                 else:
                     try:
                         return torch.hub.load('ultralytics/yolov5', 'custom', path=p, trust_repo=True)
                     except TypeError:
                         return torch.hub.load('ultralytics/yolov5', 'custom', path=p)
 
-            # 取消自动识别：默认强制按 YOLOv5 加载，如需 YOLOv8 可手动设置 forced_model_type='v8'
+            def _try_load_v3(p):
+                # 本地 YOLOv3 仓库通过 hubconf.py 的 custom 实现
+                if v3_repo and os.path.isdir(v3_repo):
+                    try:
+                        return torch.hub.load(v3_repo, 'custom', path=p, source='local', trust_repo=True)
+                    except TypeError:
+                        return torch.hub.load(v3_repo, 'custom', path=p, source='local')
+                else:
+                    # 若缺失本地仓库，不做联网加载，严格匹配直接报错
+                    raise RuntimeError('未找到本地 YOLOv3 仓库 (缺少 hubconf.py)')
+
+            def _try_load_v1(p):
+                # 动态导入 YOLOv1 工程代码
+                if not v1_repo or not os.path.isdir(v1_repo):
+                    raise RuntimeError('未找到本地 YOLOv1 工程 (缺少 NetModel.py)')
+                import importlib, types
+                if v1_repo not in sys.path:
+                    sys.path.insert(0, v1_repo)
+                NetModel = importlib.import_module('NetModel')
+                Utils = importlib.import_module('Utils')
+                # 读取默认超参
+                try:
+                    hyper = Utils.load_hyperparameters()
+                except Exception:
+                    hyper = {'input_size': 448, 'grid_size': 7, 'num_classes': 20}
+                input_size = int(hyper.get('input_size', 448))
+                grid_size = int(hyper.get('grid_size', 7))
+                num_classes = int(hyper.get('num_classes', 20))
+                # 构建模型
+                model = NetModel.YOLOv1(
+                    class_num=num_classes,
+                    grid_size=grid_size,
+                    training_mode='detection',
+                    input_size=input_size,
+                    use_efficient_backbone=True
+                )
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                model.to(device)
+                model.eval()
+                # 加载权重（兼容包含'模型键'或直接 state_dict 的情况）
+                try:
+                    add_safe_globals = getattr(torch.serialization, 'add_safe_globals', None)
+                    if add_safe_globals is not None:
+                        try:
+                            import numpy as _np
+                            add_safe_globals([_np.core.multiarray.scalar])
+                        except Exception:
+                            pass
+                    ckpt = torch.load(p, map_location=device)
+                except Exception:
+                    # 回退：明确允许不安全反序列化（仅在可信来源下）
+                    ckpt = torch.load(p, map_location=device, weights_only=False)
+
+                # 兼容各种常见键名
+                state = None
+                if isinstance(ckpt, dict):
+                    for _k in ('model_state_dict', 'state_dict', 'weights', 'params'):
+                        if _k in ckpt:
+                            state = ckpt[_k]
+                            break
+                    if state is None:
+                        state = ckpt
+                else:
+                    state = ckpt
+                model.load_state_dict(state, strict=False)
+                # 类别名与解码函数
+                try:
+                    class_names = Utils.create_class_names('voc')
+                except Exception:
+                    class_names = [str(i) for i in range(num_classes)]
+                decode_func = Utils.decode_yolo_output
+                # 返回模型与v1上下文
+                v1_ctx = {
+                    'input_size': input_size,
+                    'grid_size': grid_size,
+                    'num_classes': num_classes,
+                    'class_names': class_names,
+                    'decode_func': decode_func,
+                    'device': device,
+                }
+                return model, v1_ctx
+
             forced = getattr(self, 'forced_model_type', None)
-            if forced == 'v8':
+            # 严格匹配：仅按指定或可明确推断的类型加载，不做跨版本回退
+            target_type = None
+            if forced in ('v8', 'v5'):
+                target_type = forced
+            else:
+                # 基于路径关键词的最小化推断（仅用于防误判，不做跨加载）
+                if 'yolov8' in path_lower or 'ultralytics' in path_lower or prefer_v8:
+                    target_type = 'v8'
+                elif 'yolov5' in path_lower or prefer_v5:
+                    target_type = 'v5'
+                elif 'yolov3' in path_lower or prefer_v3:
+                    target_type = 'v3'
+                elif 'yolov1' in path_lower or prefer_v1:
+                    target_type = 'v1'
+                else:
+                    self.console.append("❌ 未能明确识别该权重的模型类型。为避免错误加载，已取消本次加载。请将权重放在 YOLOv5 或 YOLOv8 目录，或在代码中设置 forced_model_type。")
+                    if hasattr(self, 'btn_play'):
+                        self.btn_play.setEnabled(False)
+                    return None
+
+            if target_type == 'v8':
                 model = _try_load_v8(weights_path)
                 self.model_type = 'v8'
                 self.console.append(f"✅ 已按 YOLOv8 加载: {os.path.basename(weights_path)}")
-            else:
+            elif target_type == 'v5':
                 model = _try_load_v5(weights_path)
                 self.model_type = 'v5'
                 self.console.append(f"✅ 已按 YOLOv5 加载: {os.path.basename(weights_path)}")
+            elif target_type == 'v3':
+                model = _try_load_v3(weights_path)
+                self.model_type = 'v3'
+                self.console.append(f"✅ 已按 YOLOv3 加载: {os.path.basename(weights_path)}")
+            elif target_type == 'v1':
+                model, v1_ctx = _try_load_v1(weights_path)
+                self.model_type = 'v1'
+                # 保存到实例，供推理线程使用
+                self._v1_ctx = v1_ctx
+                self.console.append(f"✅ 已按 YOLOv1 加载: {os.path.basename(weights_path)}")
+            else:
+                raise RuntimeError('未知的模型类型')
 
             # 设置阈值（与UI保持一致），兼容不同版本API
             try:
@@ -356,7 +568,7 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             # 推理设备
             try:
                 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                if self.model_type == 'v5':
+                if self.model_type in ('v5', 'v3'):
                     model.to(device)
                 else:
                     try:
@@ -377,15 +589,19 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
                 with torch.no_grad():
                     if self.model_type == 'v8':
                         _ = model(dummy, imgsz=int(self.infer_size), conf=float(getattr(self, 'confidence_value', 0.5)), iou=float(getattr(self, 'iou_value', 0.45)))
-                    else:
+                    elif self.model_type in ('v5', 'v3'):
                         _ = model(dummy, size=int(self.infer_size))
+                    else:
+                        # v1 预热一次
+                        import torch as _t
+                        _ = model(_t.from_numpy(dummy).float().permute(2, 0, 1).unsqueeze(0).to(self._v1_ctx.get('device', 'cpu')))
             except Exception:
                 pass
 
             # 更新模型状态标签
             if hasattr(self, 'lbl_model_status'):
-                label_type = 'v8' if getattr(self, 'model_type', 'v5') == 'v8' else 'v5'
-                self.lbl_model_status.setText(f"📋 模型就绪 (YOLO{label_type.upper()})")
+                mt = getattr(self, 'model_type', 'v5').upper()
+                self.lbl_model_status.setText(f"📋 模型就绪 (YOLO{mt})")
 
             return model
         except Exception as e:
@@ -418,12 +634,64 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
 
             # 推理（节流不需要，因为单次图像检测）
             with torch.no_grad():
-                if getattr(self, 'model_type', 'v5') == 'v8':
+                mt = getattr(self, 'model_type', 'v5')
+                if mt == 'v8':
                     results = self.model(bgr, imgsz=int(self.infer_size), conf=float(getattr(self, 'confidence_value', 0.5)), iou=float(getattr(self, 'iou_value', 0.45)))
                     rendered = results[0].plot()
-                else:
+                elif mt in ('v5', 'v3'):
                     results = self.model(bgr, size=int(self.infer_size))
                     rendered = results.render()[0]
+                elif mt == 'v1' and hasattr(self, '_v1_ctx') and self._v1_ctx:
+                    # 使用与线程一致的预处理与解码
+                    ctx = self._v1_ctx
+                    input_size = int(ctx.get('input_size', 448))
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    h0, w0 = rgb.shape[:2]
+                    max_edge = max(h0, w0)
+                    top = (max_edge - h0) // 2
+                    bottom = max_edge - h0 - top
+                    left = (max_edge - w0) // 2
+                    right = max_edge - w0 - left
+                    padded = cv2.copyMakeBorder(rgb, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                    resized = cv2.resize(padded, (input_size, input_size))
+                    tensor = torch.from_numpy(resized).float().permute(2, 0, 1) / 255.0
+                    mean = torch.tensor([0.408, 0.448, 0.471]).view(3, 1, 1)
+                    std = torch.tensor([0.242, 0.239, 0.234]).view(3, 1, 1)
+                    tensor = (tensor - mean) / std
+                    tensor = tensor.unsqueeze(0).to(ctx.get('device', 'cpu'))
+                    preds = self.model(tensor)
+                    decoded_list = ctx['decode_func'](
+                        preds.detach().cpu(),
+                        conf_threshold=float(getattr(self, 'confidence_value', 0.5)),
+                        nms_threshold=float(getattr(self, 'iou_value', 0.45)),
+                        input_size=input_size,
+                        grid_size=int(ctx.get('grid_size', 7)),
+                        num_classes=int(ctx.get('num_classes', 20))
+                    )
+                    det = decoded_list[0]
+                    boxes = det.get('boxes', None)
+                    scores = det.get('scores', None)
+                    cls_ids = det.get('class_ids', None)
+                    if boxes is not None and len(boxes) > 0:
+                        scale = max_edge / input_size
+                        boxes = boxes.copy() * scale
+                        boxes[:, [0, 2]] -= left
+                        boxes[:, [1, 3]] -= top
+                        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, w0)
+                        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h0)
+                    rendered = bgr.copy()
+                    names = ctx.get('class_names', [])
+                    if boxes is not None and len(boxes) > 0:
+                        for i in range(boxes.shape[0]):
+                            x1, y1, x2, y2 = [int(v) for v in boxes[i].tolist()]
+                            conf_v = float(scores[i]) if scores is not None else 0.0
+                            cls_v = int(cls_ids[i]) if cls_ids is not None else 0
+                            label = names[cls_v] if isinstance(names, (list, tuple)) and 0 <= cls_v < len(names) else f'class{cls_v}'
+                            cv2.rectangle(rendered, (x1, y1), (x2, y2), (0, 200, 255), 2)
+                            cv2.putText(rendered, f"{label} {conf_v:.2f}", (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+                else:
+                    self.console.append("❌ 未知的模型类型，无法进行检测")
+                    return
             inference_ms = int((time.time() - start_ts) * 1000)
 
             # 显示到UI（转RGB再显示）
@@ -435,15 +703,47 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             self.lbl_video.setPixmap(scaled_pixmap)
 
             # 解析结果并更新统计信息
-            targets, class_counts, recent_text = self._parse_yolo_results(results)
+            if getattr(self, 'model_type', 'v5') == 'v1':
+                # 构造与 _parse_yolo_results 一致的计数
+                total = 0
+                class_counts = {}
+                recent_text = "无检测"
+                if 'boxes' in det and det['boxes'] is not None and len(det['boxes']) > 0:
+                    total = int(det['boxes'].shape[0])
+                    names = self._v1_ctx.get('class_names', [])
+                    if 'class_ids' in det and det['class_ids'] is not None:
+                        import numpy as _np
+                        cls = det['class_ids']
+                        unique_cls = _np.unique(cls)
+                        for ci in unique_cls:
+                            en = names[int(ci)] if isinstance(names, (list, tuple)) else f'class{int(ci)}'
+                            class_counts[en] = int((_np.array(cls) == ci).sum())
+                    if 'scores' in det and det['scores'] is not None and len(det['scores']) > 0:
+                        import numpy as _np
+                        conf = det['scores']
+                        cls = det['class_ids'] if det.get('class_ids') is not None else [0] * len(conf)
+                        top_idx = _np.argsort(-conf)[:3]
+                        labels = []
+                        for i in top_idx:
+                            en = names[int(cls[i])] if isinstance(names, (list, tuple)) else f'class{int(cls[i])}'
+                            labels.append(f"{en} {conf[i]:.2f}")
+                        if labels:
+                            recent_text = ", ".join(labels)
+                targets, recent = total, recent_text
+            else:
+                targets, class_counts, recent_text = self._parse_yolo_results(results)
             self.recent_detections.append(recent_text)
             self.update_detection_info(targets, inference_ms, 0, 100, class_counts, status="完成")
 
-            # 自动保存结果
+            # 保存结果：统一由保存目录决定
             if hasattr(self, 'cb_save') and self.cb_save.isChecked():
-                save_path = os.path.splitext(image_path)[0] + "_det.jpg"
-                cv2.imencode('.jpg', rendered)[1].tofile(save_path)
-                self.console.append(f"💾 结果已保存: {os.path.basename(save_path)}")
+                if not getattr(self, 'save_image_dir', None):
+                    self._prompt_save_image_dir()
+                if getattr(self, 'save_image_dir', None):
+                    base = os.path.splitext(os.path.basename(image_path))[0]
+                    save_path = os.path.join(self.save_image_dir, base + "_det.jpg")
+                    cv2.imencode('.jpg', rendered)[1].tofile(save_path)
+                    self.console.append(f"💾 结果已保存: {os.path.basename(save_path)}")
 
             self.console.append("✅ 图像检测完成")
 
@@ -575,6 +875,10 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             self.stop_all()  # 停止其他模式
             self.current_image_path = file_path
             self.console.append(f"🖼️ 已选择图像: {os.path.basename(file_path)}")
+            # 勾选保存结果时，先确保保存目录
+            if hasattr(self, 'cb_save') and self.cb_save.isChecked():
+                if not getattr(self, 'save_image_dir', None):
+                    self._prompt_save_image_dir()
             # 显示图像并进行检测
             self.detect_image(file_path)
 
@@ -586,6 +890,10 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
         if file_path:
             self.stop_all()  # 停止其他模式
             self.console.append(f"🎬 已选择视频: {os.path.basename(file_path)}")
+            # 勾选保存结果时，先确保保存目录
+            if hasattr(self, 'cb_save') and self.cb_save.isChecked():
+                if not getattr(self, 'save_image_dir', None):
+                    self._prompt_save_image_dir()
             self.start_video_playback(file_path)
             # 开始后台推理线程
             self._start_infer_thread()
@@ -629,9 +937,9 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
         # 开启检测模式（用于摄像头/视频）
         self.detecting = True
         self._start_infer_thread()
-        # 如勾选保存结果，询问图片序列保存文件夹
+        # 如勾选保存结果，统一在首次需要时询问保存目录（所有模式通用）
         if hasattr(self, 'cb_save') and self.cb_save.isChecked():
-            if (self.camera_running or (self.video_thread and self.video_thread.isRunning())):
+            if not getattr(self, 'save_image_dir', None):
                 self._prompt_save_image_dir()
         if self.camera_running:
             self.console.append("▶️ 已启用摄像头实时检测")
@@ -682,6 +990,19 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             # 根据权重文件名推断线程的模型类型
             model_type = getattr(self, 'model_type', 'v5')
             self.infer_thread = InferenceThread(self.model, self.infer_size, self.frame_skip, self.infer_interval_ms, model_type=model_type, conf=getattr(self, 'confidence_value', 0.5), iou=getattr(self, 'iou_value', 0.45))
+            # 若为 v1，注入推理上下文
+            try:
+                if getattr(self, 'model_type', '') == 'v1' and hasattr(self, '_v1_ctx') and self._v1_ctx:
+                    self.infer_thread.set_v1_context(
+                        input_size=int(self._v1_ctx.get('input_size', 448)),
+                        grid_size=int(self._v1_ctx.get('grid_size', 7)),
+                        num_classes=int(self._v1_ctx.get('num_classes', 20)),
+                        class_names=self._v1_ctx.get('class_names', []),
+                        decode_func=self._v1_ctx.get('decode_func'),
+                        device=self._v1_ctx.get('device', 'cpu')
+                    )
+            except Exception:
+                pass
             # 使用QueuedConnection确保跨线程UI信号安全
             try:
                 from PyQt5.QtCore import Qt as _Qt
@@ -698,6 +1019,19 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
         else:
             model_type = getattr(self, 'model_type', 'v5')
             self.infer_thread.update_params(self.infer_size, self.frame_skip, self.infer_interval_ms, conf=getattr(self, 'confidence_value', 0.5), iou=getattr(self, 'iou_value', 0.45), model_type=model_type)
+            # 若为 v1，更新上下文
+            try:
+                if getattr(self, 'model_type', '') == 'v1' and hasattr(self, '_v1_ctx') and self._v1_ctx:
+                    self.infer_thread.set_v1_context(
+                        input_size=int(self._v1_ctx.get('input_size', 448)),
+                        grid_size=int(self._v1_ctx.get('grid_size', 7)),
+                        num_classes=int(self._v1_ctx.get('num_classes', 20)),
+                        class_names=self._v1_ctx.get('class_names', []),
+                        decode_func=self._v1_ctx.get('decode_func'),
+                        device=self._v1_ctx.get('device', 'cpu')
+                    )
+            except Exception:
+                pass
 
     def _stop_infer_thread(self):
         if self.infer_thread is not None:
@@ -769,31 +1103,37 @@ class AutonomousDrivingUI(QMainWindow, AutonomousDrivingUISetup, CameraVideoHand
             self._clear_save_state()
 
     def on_select_weight_clicked(self):
-        """点击‘选择权重’：先选 YOLO 类型(v3/v5/v8)，再在固定目录中选 .pt 文件。"""
+        """点击‘选择权重’：直接弹出文件选择，不再弹模型类型菜单。"""
         try:
-            types = ["YOLOv3", "YOLOv5", "YOLOv8"]
-            model_type, ok = QInputDialog.getItem(self, "选择模型类型", "模型类型:", types, 1, False)
-            if not ok or not model_type:
-                self.console.append("ℹ️ 已取消选择模型类型")
-                return
+            # 起始目录：优先最近一次所选目录；否则使用项目根或用户目录
+            start_dir = None
+            try:
+                if getattr(self, 'selected_weight_path', None):
+                    start_dir = os.path.dirname(self.selected_weight_path)
+            except Exception:
+                start_dir = None
+            if not start_dir or not os.path.isdir(start_dir):
+                base_dir = self._get_base_dir()
+                candidate_dirs = [
+                    os.path.join(base_dir, 'YOLOv8'),
+                    os.path.join(base_dir, 'YOLOv5'),
+                    os.path.join(base_dir, 'YOLOv3'),
+                    base_dir,
+                ]
+                start_dir = next((d for d in candidate_dirs if os.path.isdir(d)), os.path.expanduser("~"))
 
-            fixed_dirs = {
-                'YOLOv3': r"F:\\desktop\\SEU\\卓工\\YOLOv3",
-                'YOLOv5': r"F:\\desktop\\SEU\\卓工\\YOLOv5",
-                'YOLOv8': r"F:\\desktop\\SEU\\卓工\\YOLOv8",
-            }
-            start_dir = fixed_dirs.get(model_type, r"F:\\desktop\\SEU\\卓工")
-            if not os.path.isdir(start_dir):
-                self.console.append(f"⚠️ 目录不存在: {start_dir}，回退到用户目录")
-                start_dir = os.path.expanduser("~")
-
-            file_path, _ = QFileDialog.getOpenFileName(self, f"选择 {model_type} 权重(.pt)", start_dir, "PyTorch 权重 (*.pt)")
+            file_path, _ = QFileDialog.getOpenFileName(self, "选择权重(.pt/.pth)", start_dir, "PyTorch 权重 (*.pt *.pth)")
             if not file_path or not os.path.isfile(file_path):
                 self.console.append("ℹ️ 已取消选择权重")
                 return
 
             self.selected_weight_path = file_path
-            self.forced_model_type = 'v8' if model_type == 'YOLOv8' else 'v5'
+            # 取消固定菜单后，默认不推断跨版本加载；清空 forced_model_type
+            if hasattr(self, 'forced_model_type'):
+                try:
+                    del self.forced_model_type
+                except Exception:
+                    self.forced_model_type = None
             if hasattr(self, 'lbl_weight_path'):
                 self.lbl_weight_path.setText(file_path)
 
