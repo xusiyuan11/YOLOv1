@@ -96,10 +96,38 @@ class SwinYOLOTrainer:
         self.map_history = []
         self.map_epochs = []
         
+        # mAP计算优化配置 (应用YOLOv1/v3优化经验)
+        self.map_calculation_config = {
+            'calculate_interval': 2,  # 每2个epoch计算一次mAP
+            'fast_mode': True,        # 使用快速mAP计算
+            'sample_ratio': 0.3,      # 只用30%的验证集计算mAP
+            'confidence_threshold': 0.2,  # SwinYOLO适合的置信度阈值
+            'max_detections': 100,    # 限制每张图的最大检测数
+        }
+        
         print(f"✅ SwinYOLO训练器初始化完成")
         print(f"   设备: {self.device}")
+        print(f"   mAP计算优化: 间隔{self.map_calculation_config['calculate_interval']}轮, 快速模式启用")
         print(f"   模型参数: {sum(p.numel() for p in self.model.parameters()):,}")
         print(f"   保存目录: {self.save_dir}")
+    
+    def configure_map_calculation(self, calculate_interval=None, fast_mode=None, 
+                                 sample_ratio=None, confidence_threshold=None, max_detections=None):
+        """动态配置mAP计算参数 (应用YOLOv1/v3优化经验)"""
+        if calculate_interval is not None:
+            self.map_calculation_config['calculate_interval'] = calculate_interval
+        if fast_mode is not None:
+            self.map_calculation_config['fast_mode'] = fast_mode
+        if sample_ratio is not None:
+            self.map_calculation_config['sample_ratio'] = sample_ratio
+        if confidence_threshold is not None:
+            self.map_calculation_config['confidence_threshold'] = confidence_threshold
+        if max_detections is not None:
+            self.map_calculation_config['max_detections'] = max_detections
+            
+        print(f"🔧 SwinYOLO mAP计算配置已更新:")
+        for key, value in self.map_calculation_config.items():
+            print(f"  {key}: {value}")
     
     def create_optimizer(self, base_lr=0.001, backbone_lr_ratio=0.1, weight_decay=0.0005):
         """创建优化器，使用不同的学习率"""
@@ -325,10 +353,53 @@ class SwinYOLOTrainer:
         class_aps = [(k, v) for k, v in map_results.items() if k.startswith('class_')]
         class_aps.sort(key=lambda x: x[1], reverse=True)
         
-        print("   Top 5 类别AP:")
+        print("   类别AP分布:")
+        # 显示所有类别的AP值，便于调试
+        non_zero_aps = [(k, v) for k, v in class_aps if v > 0.001]
+        zero_aps = [(k, v) for k, v in class_aps if v <= 0.001]
+        
+        print(f"     有效类别数: {len(non_zero_aps)}/{len(class_aps)}")
+        print("     Top 5 类别AP:")
         for i, (class_name, ap) in enumerate(class_aps[:5]):
             class_id = int(class_name.split('_')[1])
-            print(f"     类别{class_id}: {ap:.4f}")
+            class_name_str = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow',
+                             'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'][class_id]
+            print(f"     类别{class_id}({class_name_str}): {ap:.4f}")
+        
+        if len(zero_aps) > 15:  # 如果超过15个类别AP为0
+            print(f"     ⚠️  警告: {len(zero_aps)}个类别的AP为0，可能存在问题!")
+            print(f"     建议检查: 数据分布、模型预测、类别映射")
+        
+        return map_results
+    
+    def evaluate_map_fast(self, val_loader, conf_threshold=0.1, iou_threshold=0.5, max_batches=10):
+        """
+        快速mAP评估 - 只评估前几个batch，用于训练初期快速反馈
+        
+        Args:
+            val_loader: 验证数据加载器
+            conf_threshold: 置信度阈值
+            iou_threshold: IoU阈值  
+            max_batches: 最大评估batch数
+        """
+        print(f"📊 快速mAP评估 (仅前{max_batches}个batch)...")
+        
+        # 创建一个限制batch数量的子集
+        from itertools import islice
+        limited_loader = islice(val_loader, max_batches)
+        
+        # 使用现有的评估函数，但只处理有限的数据
+        map_results = evaluate_model(
+            model=self.model,
+            dataloader=limited_loader,
+            device=self.device,
+            num_classes=self.num_classes,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold
+        )
+        
+        print(f"✅ 快速mAP评估完成 (基于{max_batches}个batch):")
+        print(f"   mAP@0.5: {map_results['mAP']:.4f}")
         
         return map_results
     
@@ -456,7 +527,7 @@ class SwinYOLOTrainer:
     
     def load_checkpoint(self, checkpoint_path, optimizer=None, scheduler=None):
         """加载检查点"""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         
@@ -561,16 +632,69 @@ class SwinYOLOTrainer:
             if is_best:
                 best_loss = val_metrics['total_loss']
             
-            # 每5个epoch进行mAP评估 (更频繁)
-            if (epoch + 1) % 5 == 0:
-                map_results = self.evaluate_map(val_loader, conf_threshold=0.1, iou_threshold=0.5)
+            # 🚀 优化评估频率 - 参考现代YOLO实践
+            # 前20轮每5轮评估，中期每3轮评估，后期每轮评估
+            if epoch < 20:
+                should_evaluate = (epoch + 1) % 5 == 0  # 前20轮：每5轮评估
+            elif epoch < 50:
+                should_evaluate = (epoch + 1) % 3 == 0  # 中期：每3轮评估  
+            else:
+                should_evaluate = (epoch + 1) % 1 == 0  # 后期：每轮评估
+            
+            if should_evaluate:
+                # 训练初期使用更低的置信度阈值，随着训练进行逐渐提高
+                if epoch < 20:
+                    conf_thresh = 0.01  # 前20轮使用很低的阈值
+                elif epoch < 50:
+                    conf_thresh = 0.05  # 中期逐渐提高
+                else:
+                    conf_thresh = 0.1   # 后期使用标准阈值
+                
+                # 🚀 智能mAP计算 (应用YOLOv1/v3优化经验)
+                start_time = time.time()
+                
+                if self.map_calculation_config['fast_mode']:
+                    # 快速模式：使用采样比例
+                    sample_ratio = self.map_calculation_config['sample_ratio']
+                    max_batches = max(1, int(len(val_loader) * sample_ratio))
+                    map_results = self.evaluate_map_fast(
+                        val_loader, 
+                        conf_threshold=self.map_calculation_config['confidence_threshold'], 
+                        max_batches=max_batches
+                    )
+                    print(f"  快速mAP模式: 使用{max_batches}/{len(val_loader)}批数据")
+                else:
+                    # 完整模式
+                    map_results = self.evaluate_map(
+                        val_loader, 
+                        conf_threshold=self.map_calculation_config['confidence_threshold'], 
+                        iou_threshold=0.5
+                    )
+                
+                map_time = time.time() - start_time
+                print(f"  ⏱️ mAP计算耗时: {map_time:.1f}秒")
+                
                 self.map_history.append(map_results)
                 self.map_epochs.append(epoch + 1)
-                print(f"  Epoch {epoch+1} mAP: {map_results['mAP']:.4f}")
+                print(f"  📊 mAP: {map_results['mAP']:.4f}")
                 
-                # 每10个epoch生成实时图表
-                if (epoch + 1) % 10 == 0:
-                    self.plot_real_time_results(epoch + 1)
+                # 额外分析（降低频率）
+                if (epoch + 1) % 6 == 0:  # 每6轮详细分析一次
+                    self._analyze_class_predictions(val_loader, epoch + 1)
+            else:
+                # 不计算mAP的轮次，复用上一次的值
+                if len(self.map_history) > 0:
+                    self.map_history.append(self.map_history[-1])
+                    self.map_epochs.append(epoch + 1)
+                else:
+                    self.map_history.append({'mAP': 0.0})
+                    self.map_epochs.append(epoch + 1)
+                
+                print(f"  ⏭️ 跳过SwinYOLO mAP计算 (第{epoch+1}轮)")
+            
+            # 每10个epoch生成实时图表
+            if (epoch + 1) % 10 == 0:
+                self.plot_real_time_results(epoch + 1)
             
             # 每10个epoch保存一次
             if (epoch + 1) % 10 == 0 or is_best:
@@ -601,6 +725,65 @@ class SwinYOLOTrainer:
         
         print(f"📊 训练历史已保存到: {history_path}")
         print(f"🎨 最终可视化图表已保存到: {final_vis_dir}")
+    
+    def _analyze_class_predictions(self, val_loader, epoch):
+        """分析模型的类别预测情况"""
+        print(f"🔍 Epoch {epoch} - 详细类别预测分析:")
+        
+        self.model.eval()
+        class_prediction_counts = {}
+        class_confidence_sums = {}
+        total_predictions = 0
+        
+        with torch.no_grad():
+            # 只分析前几个batch，避免太慢
+            for batch_idx, (images, targets) in enumerate(val_loader):
+                if batch_idx >= 3:  # 只分析前3个batch
+                    break
+                    
+                images = images.to(self.device)
+                predictions = self.model(images)
+                
+                # 解码预测结果
+                batch_detections = decode_predictions(
+                    predictions, 
+                    conf_threshold=0.001  # 使用很低的阈值看所有预测
+                )
+                
+                for detections in batch_detections:
+                    for det in detections:
+                        class_id = det['class_id']
+                        confidence = det['score']
+                        
+                        if class_id not in class_prediction_counts:
+                            class_prediction_counts[class_id] = 0
+                            class_confidence_sums[class_id] = 0.0
+                        
+                        class_prediction_counts[class_id] += 1
+                        class_confidence_sums[class_id] += confidence
+                        total_predictions += 1
+        
+        if total_predictions > 0:
+            print(f"   总预测数: {total_predictions}")
+            print(f"   预测类别数: {len(class_prediction_counts)}/20")
+            
+            # 显示top预测类别
+            sorted_classes = sorted(class_prediction_counts.items(), 
+                                  key=lambda x: x[1], reverse=True)
+            
+            voc_classes = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow',
+                          'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
+            
+            print("   Top预测类别:")
+            for i, (class_id, count) in enumerate(sorted_classes[:5]):
+                avg_conf = class_confidence_sums[class_id] / count
+                percentage = (count / total_predictions) * 100
+                class_name = voc_classes[class_id] if class_id < len(voc_classes) else f'class_{class_id}'
+                print(f"     {class_id}({class_name}): {count}次({percentage:.1f}%), 平均置信度:{avg_conf:.3f}")
+        else:
+            print("   ❌ 没有任何预测结果!")
+        
+        print()
 
 
 def main():
@@ -655,6 +838,9 @@ def main():
         print(f"   训练集: {len(train_dataset)} 样本 ({train_size/total_size*100:.1f}%)")
         print(f"   验证集: {len(val_dataset)} 样本 ({val_size/total_size*100:.1f}%)")
         
+        # 🔍 检查数据集类别分布
+        analyze_dataset_distribution(full_dataset)
+        
     except Exception as e:
         print(f"❌ 数据集加载失败: {e}")
         print("使用虚拟数据进行演示...")
@@ -707,6 +893,66 @@ def main():
         weight_decay=config['weight_decay'],
         freeze_backbone_epochs=config['freeze_backbone_epochs']
     )
+
+
+def analyze_dataset_distribution(dataset, sample_size=200):
+    """分析数据集中的类别分布"""
+    from collections import Counter
+    import random
+    
+    print(f"📊 分析数据集类别分布 (采样{min(sample_size, len(dataset))}个样本)...")
+    
+    class_counts = Counter()
+    sample_indices = random.sample(range(len(dataset)), min(sample_size, len(dataset)))
+    
+    voc_classes = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow',
+                   'diningtable', 'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
+    
+    for idx in sample_indices:
+        try:
+            _, targets = dataset[idx]  # targets = [gt, mask_pos, mask_neg]
+            gt = targets[0]  # 获取ground truth
+            
+            # 遍历网格找到有对象的位置
+            grid_size = gt.size(0)
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    # 检查置信度 (第4和第9个位置是两个box的置信度)
+                    conf1 = gt[i, j, 4].item()
+                    conf2 = gt[i, j, 9].item()
+                    
+                    if conf1 > 0.5 or conf2 > 0.5:  # 如果有对象
+                        # 获取类别 (第10位开始是20个类别的one-hot)
+                        class_probs = gt[i, j, 10:30]
+                        class_id = torch.argmax(class_probs).item()
+                        class_counts[class_id] += 1
+                        
+        except Exception as e:
+            continue
+    
+    # 显示统计结果
+    total_objects = sum(class_counts.values())
+    print(f"   发现对象总数: {total_objects}")
+    print(f"   包含类别数: {len(class_counts)}/20")
+    
+    if class_counts:
+        print("   类别分布 (前10):")
+        for class_id, count in class_counts.most_common(10):
+            if class_id < len(voc_classes):
+                class_name = voc_classes[class_id]
+                percentage = (count / total_objects) * 100
+                print(f"     {class_id:2d}({class_name:12s}): {count:3d} ({percentage:5.1f}%)")
+        
+        # 检查是否存在严重不平衡
+        max_count = max(class_counts.values())
+        min_count = min(class_counts.values()) if class_counts else 0
+        if max_count > min_count * 10:
+            print(f"   ⚠️  数据不平衡严重! 最多类别{max_count}个，最少类别{min_count}个")
+            print(f"   这可能导致模型偏向频繁类别")
+    else:
+        print(f"   ❌ 未找到任何对象! 数据集可能有问题")
+    
+    print()
 
 
 if __name__ == "__main__":

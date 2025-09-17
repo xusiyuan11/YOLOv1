@@ -45,7 +45,8 @@ def _transform_coords(coords: List[List], top: int, left: int, max_edge: int, in
 
 def _encode_ground_truth(coords: List[List], input_size: int, grid_size: int, class_num: int, class_smooth_value: float):
     """Encode YOLOv1 ground truth in SwinYOLO format."""
-    feature_size = input_size // grid_size
+    feature_size = grid_size  # grid_size是网格数量，不是像素大小
+    cell_size = input_size / grid_size  # 每个网格的像素大小
     num_boxes = 2  # SwinYOLO使用2个边界框
     
     # 格式: [num_boxes*4 + num_boxes + num_classes] = [2*4 + 2 + 20] = [10 + 20] = 30
@@ -60,14 +61,16 @@ def _encode_ground_truth(coords: List[List], input_size: int, grid_size: int, cl
         h = ymax - ymin
         cx = (xmin + xmax) / 2
         cy = (ymin + ymax) / 2
+        
+        # 坐标已经归一化到[0,1]，直接使用
         idx_row = int(cy * feature_size)
         idx_col = int(cx * feature_size)
         idx_row = min(max(idx_row, 0), feature_size - 1)
         idx_col = min(max(idx_col, 0), feature_size - 1)
 
-        # 计算相对于网格单元的坐标
-        rel_cx = cx * feature_size - idx_col
-        rel_cy = cy * feature_size - idx_row
+        # 计算相对于网格单元的坐标（YOLO格式）
+        rel_cx = (cx * feature_size) - idx_col  # x偏移 [0,1)
+        rel_cy = (cy * feature_size) - idx_row  # y偏移 [0,1)
         
         # 生成类别标签（one-hot编码）
         # 确保class_num与模型期望的类别数一致（20）
@@ -88,9 +91,9 @@ def _encode_ground_truth(coords: List[List], input_size: int, grid_size: int, cl
         ground_truth[0:4] = [rel_cx, rel_cy, w, h]
         ground_truth[4] = 1.0  # 置信度1
         
-        # 第二个边界框（相同）
-        ground_truth[5:9] = [rel_cx, rel_cy, w, h] 
-        ground_truth[9] = 1.0  # 置信度2
+        # 第二个边界框保持为0，让网络学习多样性 (应用YOLOv1修复经验)
+        # ground_truth[5:9] 保持为0
+        # ground_truth[9] 保持为0
         
         # 类别
         ground_truth[10:10+model_class_num] = class_list
@@ -278,41 +281,45 @@ class VOC_Detection_Set(Dataset):
         mask_pos = torch.zeros((S, S), dtype=torch.bool)
         mask_neg = torch.ones((S, S), dtype=torch.bool)
 
-        stride = input_size / S
         for x1, y1, x2, y2, cls_id in coords:
+            # 坐标已经归一化到[0,1]
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
             w  = x2 - x1
             h  = y2 - y1
 
-            grid_x = int(cx // stride)
-            grid_y = int(cy // stride)
-            if 0 <= grid_x < S and 0 <= grid_y < S:
-                mask_pos[grid_y, grid_x] = True
-                mask_neg[grid_y, grid_x] = False
+            # 计算网格索引
+            grid_x = int(cx * S)
+            grid_y = int(cy * S)
+            grid_x = min(max(grid_x, 0), S - 1)
+            grid_y = min(max(grid_y, 0), S - 1)
+            
+            mask_pos[grid_y, grid_x] = True
+            mask_neg[grid_y, grid_x] = False
 
-                # SwinYOLO格式：
-                # 边界框1: [rel_cx, rel_cy, w, h] + conf1
-                # 边界框2: [rel_cx, rel_cy, w, h] + conf2  
-                # 类别: [class_0, class_1, ..., class_19]
+            # SwinYOLO格式：
+            # 边界框1: [rel_cx, rel_cy, w, h] + conf1
+            # 边界框2: [rel_cx, rel_cy, w, h] + conf2  
+            # 类别: [class_0, class_1, ..., class_19]
+            
+            # YOLO编码：相对于网格的偏移
+            rel_cx = (cx * S) - grid_x  # x偏移 [0,1)
+            rel_cy = (cy * S) - grid_y  # y偏移 [0,1)
+            norm_w = w  # 已归一化
+            norm_h = h  # 已归一化
                 
-                rel_cx = (cx % stride) / stride
-                rel_cy = (cy % stride) / stride
-                norm_w = w / input_size
-                norm_h = h / input_size
-                
-                # 第一个边界框
-                gt[grid_y, grid_x, 0:5] = torch.tensor([rel_cx, rel_cy, norm_w, norm_h, 1.0])
-                
-                # 第二个边界框（相同）
-                gt[grid_y, grid_x, 5:10] = torch.tensor([rel_cx, rel_cy, norm_w, norm_h, 1.0])
+            # 第一个边界框
+            gt[grid_y, grid_x, 0:5] = torch.tensor([rel_cx, rel_cy, norm_w, norm_h, 1.0])
+            
+            # 第二个边界框（相同）
+            gt[grid_y, grid_x, 5:10] = torch.tensor([rel_cx, rel_cy, norm_w, norm_h, 1.0])
 
-                # 类别（one-hot编码）
-                one_hot = torch.zeros(model_class_num)
-                if 0 <= cls_id < model_class_num:
-                    one_hot[cls_id] = 1.0 - smooth
-                    one_hot += smooth / model_class_num
-                gt[grid_y, grid_x, 10:] = one_hot
+            # 类别（one-hot编码）
+            one_hot = torch.zeros(model_class_num)
+            if 0 <= cls_id < model_class_num:
+                one_hot[cls_id] = 1.0 - smooth
+                one_hot += smooth / model_class_num
+            gt[grid_y, grid_x, 10:] = one_hot
 
         return gt, mask_pos, mask_neg
 

@@ -17,10 +17,10 @@ def load_hyperparameters(config_path: str = None) -> Dict:
         'weight_decay': 0.0005,
         'momentum': 0.9,
         'input_size': 448,
-        'grid_size': 64,
+        'grid_size': 7,          # 修正：7x7网格，不是64像素
         'num_classes': 20,
-        'lambda_coord': 5.0,
-        'lambda_noobj': 0.5,
+        'lambda_coord': 10.0,    # 应用YOLOv1/v3优化经验
+        'lambda_noobj': 0.1,     # 减少无目标损失权重
         'class_smooth_value': 0.01,
         'conf_threshold': 0.1,
         'nms_threshold': 0.5,
@@ -217,7 +217,7 @@ def save_simple_checkpoint(model: nn.Module,
 
 def load_checkpoint(filepath: str):
     """加载模型检查点，返回完整的checkpoint字典"""
-    checkpoint = torch.load(filepath, map_location='cpu')
+    checkpoint = torch.load(filepath, map_location='cpu', weights_only=False)
     print(f"Checkpoint loaded from {filepath}")
     return checkpoint
 

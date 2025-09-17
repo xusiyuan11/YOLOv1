@@ -78,9 +78,9 @@ class SwinTransformerBackbone(nn.Module):
                                 state_dict = load_file(checkpoint_file)
                             except ImportError:
                                 print("safetensors not available, trying torch.load")
-                                state_dict = torch.load(checkpoint_file, map_location='cpu')
+                                state_dict = torch.load(checkpoint_file, map_location='cpu', weights_only=False)
                         else:
-                            state_dict = torch.load(checkpoint_file, map_location='cpu')
+                            state_dict = torch.load(checkpoint_file, map_location='cpu', weights_only=False)
                         
                         # 适配位置编码到新的输入尺寸
                         state_dict = self.adapt_position_embeddings(state_dict)

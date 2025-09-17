@@ -85,7 +85,7 @@ def decode_predictions(predictions: torch.Tensor,
                       grid_size: int = 7, 
                       num_boxes: int = 2, 
                       num_classes: int = 20,
-                      conf_threshold: float = 0.1,
+                      conf_threshold: float = 0.01,
                       input_size: int = 448) -> List[Dict]:
     """
     解码SwinYOLO预测结果
@@ -111,49 +111,75 @@ def decode_predictions(predictions: torch.Tensor,
         
         # 分离预测的不同部分
         boxes = pred[..., :num_boxes*4].view(grid_size, grid_size, num_boxes, 4)
-        confs = pred[..., num_boxes*4:num_boxes*5].view(grid_size, grid_size, num_boxes)
-        class_probs = pred[..., num_boxes*5:]  # [grid_size, grid_size, num_classes]
+        confs = torch.sigmoid(pred[..., num_boxes*4:num_boxes*5]).view(grid_size, grid_size, num_boxes)
+        class_probs = torch.sigmoid(pred[..., num_boxes*5:])  # [grid_size, grid_size, num_classes]
         
         detections = []
         
-        for i in range(grid_size):
-            for j in range(grid_size):
-                for k in range(num_boxes):
-                    # 获取边界框置信度
-                    conf = confs[i, j, k].item()
-                    
-                    if conf < conf_threshold:
-                        continue
-                    
-                    # 解码边界框坐标
-                    x = (j + boxes[i, j, k, 0].item()) * cell_size
-                    y = (i + boxes[i, j, k, 1].item()) * cell_size
-                    w = boxes[i, j, k, 2].item() * input_size
-                    h = boxes[i, j, k, 3].item() * input_size
-                    
-                    # 转换为(x1, y1, x2, y2)格式
-                    x1 = x - w / 2
-                    y1 = y - h / 2
-                    x2 = x + w / 2
-                    y2 = y + h / 2
-                    
-                    # 限制在图像范围内
-                    x1 = max(0, min(x1, input_size))
-                    y1 = max(0, min(y1, input_size))
-                    x2 = max(0, min(x2, input_size))
-                    y2 = max(0, min(y2, input_size))
-                    
-                    # 获取类别概率
-                    class_scores = class_probs[i, j] * conf
-                    class_id = torch.argmax(class_scores).item()
-                    class_score = class_scores[class_id].item()
-                    
-                    if class_score > conf_threshold:
-                        detections.append({
-                            'bbox': [x1, y1, x2, y2],
-                            'score': class_score,
-                            'class_id': class_id
-                        })
+        # 🚀 向量化优化 - 避免三重循环和频繁的.item()调用
+        # 🔍 调试信息：显示置信度分布
+        if b == 0:  # 只在第一个batch显示一次
+            conf_values = confs.flatten()
+            max_conf = torch.max(conf_values).item()
+            mean_conf = torch.mean(conf_values).item()
+            conf_above_001 = (conf_values > 0.001).sum().item()
+            conf_above_01 = (conf_values > 0.01).sum().item()
+            conf_above_1 = (conf_values > 0.1).sum().item()
+            
+            if max_conf < 0.1:  # 如果最大置信度都很低，输出警告
+                print(f"   🔍 置信度统计: max={max_conf:.4f}, mean={mean_conf:.4f}")
+                print(f"   🔍 置信度分布: >0.001({conf_above_001}), >0.01({conf_above_01}), >0.1({conf_above_1})")
+        
+        # 找到所有满足置信度阈值的框
+        conf_mask = confs >= conf_threshold  # [grid_size, grid_size, num_boxes]
+        
+        if conf_mask.any():
+            # 获取满足条件的索引
+            valid_indices = torch.where(conf_mask)
+            i_indices, j_indices, k_indices = valid_indices
+            
+            # 批量处理所有有效框
+            valid_boxes = boxes[i_indices, j_indices, k_indices]  # [N, 4]
+            valid_confs = confs[i_indices, j_indices, k_indices]  # [N]
+            
+            # 批量计算坐标（YOLO标准格式）
+            center_x = (j_indices.float() + valid_boxes[:, 0]) / grid_size  # 归一化到[0,1]
+            center_y = (i_indices.float() + valid_boxes[:, 1]) / grid_size  # 归一化到[0,1]
+            width = valid_boxes[:, 2]  # 已经是归一化值
+            height = valid_boxes[:, 3]  # 已经是归一化值
+            
+            # 转换为(x1, y1, x2, y2)格式
+            x1 = center_x - width / 2
+            y1 = center_y - height / 2
+            x2 = center_x + width / 2
+            y2 = center_y + height / 2
+            
+            # 限制在归一化范围内[0,1]
+            x1 = torch.clamp(x1, 0, 1)
+            y1 = torch.clamp(y1, 0, 1)
+            x2 = torch.clamp(x2, 0, 1)
+            y2 = torch.clamp(y2, 0, 1)
+            
+            # 批量处理类别概率
+            valid_class_probs = class_probs[i_indices, j_indices]  # [N, num_classes]
+            class_scores = valid_class_probs * valid_confs.unsqueeze(1)  # [N, num_classes]
+            max_class_scores, class_indices = torch.max(class_scores, dim=1)  # [N]
+            
+            # 筛选满足阈值的检测结果
+            score_mask = max_class_scores > conf_threshold
+            if score_mask.any():
+                # 只在最后进行一次CPU转换，大幅减少GPU-CPU传输
+                final_boxes = torch.stack([x1, y1, x2, y2], dim=1)[score_mask].cpu().numpy()
+                final_scores = max_class_scores[score_mask].cpu().numpy()
+                final_classes = class_indices[score_mask].cpu().numpy()
+                
+                # 批量添加检测结果
+                for i in range(len(final_boxes)):
+                    detections.append({
+                        'bbox': final_boxes[i].tolist(),
+                        'score': float(final_scores[i]),
+                        'class_id': int(final_classes[i])
+                    })
         
         batch_detections.append(detections)
     
@@ -322,7 +348,7 @@ def compute_map(all_detections: List[List[Dict]],
     return result
 
 
-def evaluate_model(model, dataloader, device, num_classes=20, conf_threshold=0.1, iou_threshold=0.5):
+def evaluate_model(model, dataloader, device, num_classes=20, conf_threshold=0.01, iou_threshold=0.5):
     """
     评估模型性能
     
@@ -360,15 +386,59 @@ def evaluate_model(model, dataloader, device, num_classes=20, conf_threshold=0.1
                 nms_detections = apply_nms_to_detections(detections, iou_threshold)
                 all_detections.append(nms_detections)
             
-            # 处理真实标注（需要根据数据格式调整）
-            if isinstance(targets, list) and len(targets) >= 1:
-                gt_targets = targets[0]  # 使用gt
-            else:
-                gt_targets = targets
+            # 处理真实标注（SwinYOLO数据格式）
+            # targets是列表：[[gt1, mask_pos1, mask_neg1], [gt2, mask_pos2, mask_neg2], ...]
+            # 我们需要提取所有的gt：[gt1, gt2, gt3, ...]
+            try:
+                if isinstance(targets, list) and len(targets) > 0:
+                    gt_list = []
+                    for sample_targets in targets:
+                        if isinstance(sample_targets, list) and len(sample_targets) >= 1:
+                            gt_list.append(sample_targets[0])  # 提取每个样本的gt
+                        else:
+                            print(f"Warning: 样本targets格式不正确，跳过")
+                            continue
+                    
+                    if len(gt_list) > 0:
+                        # 堆叠所有gt tensor
+                        gt_targets = torch.stack(gt_list)
+                    else:
+                        print(f"Warning: 没有有效的gt数据，跳过此批次的mAP计算")
+                        continue
+                else:
+                    # 如果targets不是列表格式，直接使用
+                    gt_targets = targets
+            except Exception as e:
+                print(f"Warning: 处理gt_targets时出错({e})，跳过此批次的mAP计算")
+                continue
             
             # 解码真实标注为检测格式
             batch_ground_truths = decode_ground_truths(gt_targets)
             all_ground_truths.extend(batch_ground_truths)
+    
+    # 🔍 统计预测和真实标签的类别分布 (用于调试)
+    from collections import Counter
+    pred_class_counts = Counter()
+    gt_class_counts = Counter()
+    
+    for detections in all_detections:
+        for det in detections:
+            pred_class_counts[det['class_id']] += 1
+    
+    for ground_truths in all_ground_truths:
+        for gt in ground_truths:
+            gt_class_counts[gt['class_id']] += 1
+    
+    print(f"   预测类别统计: {len(pred_class_counts)}/20个类别被预测")
+    print(f"   真实类别统计: {len(gt_class_counts)}/20个类别存在")
+    
+    if len(pred_class_counts) < 5:
+        print(f"   ⚠️  预测类别过少! 只预测了{len(pred_class_counts)}个类别")
+        print(f"   预测分布: {dict(pred_class_counts.most_common(5))}")
+    
+    if len(gt_class_counts) < 5:
+        print(f"   ⚠️  真实类别过少! 只有{len(gt_class_counts)}个类别")
+        print(f"   真实分布: {dict(gt_class_counts.most_common(5))}")
     
     # 计算mAP
     map_results = compute_map(all_detections, all_ground_truths, num_classes, iou_threshold)
@@ -376,7 +446,7 @@ def evaluate_model(model, dataloader, device, num_classes=20, conf_threshold=0.1
     return map_results
 
 
-def decode_ground_truths(gt_targets: torch.Tensor, 
+def decode_ground_truths(gt_targets, 
                         grid_size: int = 7, 
                         num_boxes: int = 2, 
                         num_classes: int = 20,
@@ -385,7 +455,7 @@ def decode_ground_truths(gt_targets: torch.Tensor,
     解码真实标注为评估格式
     
     Args:
-        gt_targets: [B, grid_size, grid_size, num_boxes*5 + num_classes]
+        gt_targets: [B, grid_size, grid_size, num_boxes*5 + num_classes] 或 list
         grid_size: 网格大小
         num_boxes: 每个网格的边界框数量
         num_classes: 类别数量
@@ -394,6 +464,20 @@ def decode_ground_truths(gt_targets: torch.Tensor,
     Returns:
         批次中每个图像的真实标注列表
     """
+    # 处理不同的输入格式
+    if isinstance(gt_targets, list):
+        if len(gt_targets) == 0:
+            return []
+        # 如果是列表，转换为tensor
+        if isinstance(gt_targets[0], torch.Tensor):
+            gt_targets = torch.stack(gt_targets)
+        else:
+            # 如果列表中的元素不是tensor，返回空结果
+            return [[] for _ in range(len(gt_targets))]
+    
+    if not isinstance(gt_targets, torch.Tensor):
+        return []
+        
     batch_size = gt_targets.size(0)
     cell_size = input_size / grid_size
     
@@ -416,11 +500,11 @@ def decode_ground_truths(gt_targets: torch.Tensor,
                     # 找到置信度最高的边界框
                     best_box_idx = torch.argmax(confs[i, j]).item()
                     
-                    # 解码边界框坐标
-                    x = (j + boxes[i, j, best_box_idx, 0].item()) * cell_size
-                    y = (i + boxes[i, j, best_box_idx, 1].item()) * cell_size
-                    w = boxes[i, j, best_box_idx, 2].item() * input_size
-                    h = boxes[i, j, best_box_idx, 3].item() * input_size
+                    # 解码边界框坐标（YOLO标准格式）
+                    x = (j + boxes[i, j, best_box_idx, 0].item()) / grid_size  # 归一化到[0,1]
+                    y = (i + boxes[i, j, best_box_idx, 1].item()) / grid_size  # 归一化到[0,1]
+                    w = boxes[i, j, best_box_idx, 2].item()  # 已经是归一化值
+                    h = boxes[i, j, best_box_idx, 3].item()  # 已经是归一化值
                     
                     # 转换为(x1, y1, x2, y2)格式
                     x1 = x - w / 2
@@ -428,11 +512,11 @@ def decode_ground_truths(gt_targets: torch.Tensor,
                     x2 = x + w / 2
                     y2 = y + h / 2
                     
-                    # 限制在图像范围内
-                    x1 = max(0, min(x1, input_size))
-                    y1 = max(0, min(y1, input_size))
-                    x2 = max(0, min(x2, input_size))
-                    y2 = max(0, min(y2, input_size))
+                    # 限制在归一化范围内[0,1]
+                    x1 = max(0, min(x1, 1))
+                    y1 = max(0, min(y1, 1))
+                    x2 = max(0, min(x2, 1))
+                    y2 = max(0, min(y2, 1))
                     
                     # 获取类别ID
                     class_id = torch.argmax(class_probs[i, j]).item()
